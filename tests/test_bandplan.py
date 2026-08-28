@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+from bettersdr.core.device import DEFAULT_SAMPLE_RATE
+from bettersdr.core.frontend import (
+    SUPPORTED_SAMPLE_RATES,
+    safe_sample_rate,
+)
 from bettersdr.dsp import demod
 from bettersdr.scan import bandplan
 
@@ -133,3 +138,34 @@ def test_overlapping_covers_a_span_for_the_ribbon():
 def test_unknown_region_says_so():
     with pytest.raises(FileNotFoundError, match="no band plan"):
         bandplan.load("atlantis")
+
+
+# -- window width ----------------------------------------------------------
+
+
+def test_am_broadcast_asks_for_a_narrow_window():
+    """The band that forced `sample_rate_hz` to exist in the first place."""
+    band = bandplan.find(710_000)
+    assert band is not None and band.name == "AM Radio"
+    assert band.sample_rate_hz is not None
+    assert band.sample_rate_hz < 2_400_000
+
+
+def test_declared_rates_are_ones_the_hardware_and_the_demodulators_accept():
+    for band in bandplan.load():
+        if band.sample_rate_hz is None:
+            continue
+        assert band.sample_rate_hz in SUPPORTED_SAMPLE_RATES, band.name
+
+
+def test_no_band_would_be_swept_through_zero_hz():
+    """Every band, at its lowest edge, gets a window clear of the dial's end.
+
+    A sweep that reaches 0 Hz reports the upconverter's own oscillator as the
+    strongest signal in the band, which is the most confidently wrong thing
+    the scanner could say.
+    """
+    for band in bandplan.load():
+        preferred = band.sample_rate_hz or DEFAULT_SAMPLE_RATE
+        rate = safe_sample_rate(band.start_hz, preferred_hz=preferred)
+        assert band.start_hz - rate / 2 > 0, band.name

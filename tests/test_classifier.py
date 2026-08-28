@@ -273,3 +273,44 @@ def test_shape_of_an_empty_spectrum_is_harmless():
 def test_classifying_without_a_shape_still_works():
     """A caller that threw the spectrum away can still use the band plan."""
     assert classify(at(94_900_000, 180_000)).label == "FM Radio"
+
+
+# -- a carrier means different things in different bands -------------------
+
+
+def _carrier(hz, bandwidth_hz=1_500.0, snr_db=38.0):
+    return Detection(
+        center_hz=hz,
+        bandwidth_hz=bandwidth_hz,
+        peak_hz=hz,
+        peak_dbfs=-30.0,
+        floor_dbfs=-30.0 - snr_db,
+    )
+
+
+def test_a_bare_carrier_on_the_airband_is_not_an_aircraft():
+    """Eighty stable carriers indoors, none of them aeroplanes."""
+    signal = classify(_carrier(124_000_000), shape=Shape(0.5, 0.2))
+    assert signal.label == "Unmodulated carrier"
+
+
+def test_a_bare_carrier_in_the_am_band_is_a_station():
+    """AM broadcasters radiate a carrier continuously; only the sidebands
+    follow the programme, so a 50 ms dwell often measures the carrier alone."""
+    signal = classify(_carrier(880_000), shape=Shape(0.5, 0.2))
+    assert signal.label == "AM Radio"
+    assert signal.mode == "am"
+
+
+def test_the_am_carrier_explanation_says_why_it_measured_narrow():
+    signal = classify(_carrier(880_000), shape=Shape(0.5, 0.2))
+    joined = " ".join(signal.reasons).lower()
+    assert "steady carrier" in joined
+    assert "comes and goes" in joined
+
+
+def test_a_strong_am_carrier_is_not_demoted_to_a_guess():
+    """Narrowness is only evidence against a signal where narrowness would be
+    surprising, and in a carrier-based band it is not."""
+    signal = classify(_carrier(880_000, snr_db=45.0), shape=Shape(0.5, 0.2))
+    assert signal.certain

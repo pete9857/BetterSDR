@@ -164,6 +164,103 @@ sections: don't re-derive them. Full reasoning in **Amendment 3** of docs/PLAN.m
   codec is proprietary with no public spec, and the subprocess boundary keeps
   its GPL lineage from dictating terms for the whole app.
 
+## HF and sample-rate facts
+
+Measured off air on this machine on 2026-08-27, prompted by "no audio on the
+AM band". Same rule as the other fact sections: don't re-derive them.
+
+- **A 2.4 MHz window on the AM band is the bug, not the antenna.** The V4's
+  SA612 upconverter leaks its local oscillator at 0 Hz on the dial. Tuned to
+  710 kHz the window spans -490 to +1910 kHz, so the leak is *inside* it at
+  **-15 dBFS, 65 dB above the noise floor**. `choose_gain` correctly drops to
+  1.4 dB to keep the 8-bit ADC out of the rails, and the wanted station goes
+  down with it. Max gain is worse, not better: the leak clips and KIRO's SNR
+  falls from 8.6 to 3.3 dB.
+- **The cure is a narrower window, and it is worth ~35 dB of audio.** At
+  240 kS/s the leak is outside the window entirely, gain rises to 28-37 dB,
+  and demodulated audio went from -64.6 to -28.7 dBFS on 710 kHz and -56.0 to
+  -24.1 dBFS on 1000 kHz. `frontend.safe_sample_rate` is the guard; it only
+  ever narrows, and the band plan's `sample_rate_hz` is where a band states a
+  preference. Only rates that are both legal for the RTL2832U and a whole
+  multiple of 48 kHz exist - see `SUPPORTED_SAMPLE_RATES`.
+- **Block sizes must be defined in time, not bytes.** 128 KB is 27 ms at
+  2.4 MS/s but **273 ms at 240 kS/s**, longer than the whole 150 ms jitter
+  buffer, so every read arrived after the sink had run dry. `read_bytes_for`
+  and `dsp_block_bytes_for` both derive from a duration and reproduce the
+  measured 128 KB / 64 KB exactly at 2.4 MS/s.
+- **A block can be smaller than one FFT frame.** At 240 kS/s a DSP block is
+  3072 samples against a 4096-point FFT, so `Spectrum.process` returned empty
+  and *the spectrum silently stopped updating* while audio carried on
+  perfectly. The engine carries the remainder between blocks.
+- **A rate change costs the audio buffer.** The ring is emptied, so the sink
+  starves for as long as it takes to refill - 25 underruns for one hop from FM
+  to AM. The sink is stopped and restarted across the change for the same
+  reason `_begin_scan` does it: an underrun count full of expected underruns
+  reports nothing.
+- **The tune offset eats into the trusted window, and it matters at low
+  rates.** The tuner sits 37 kHz off each tile centre, so a tile's lower edge
+  is 37 kHz further out than its width suggests. At 2.4 MS/s that is 1.5% of
+  the window and never binds; at 240 kS/s it is 15%, and the bottom 19 kHz of
+  every tile was measured and then discarded for being outside `EDGE_GUARD`.
+  **KIRO on 710 kHz landed exactly in that sliver and was missing from a scan
+  of its own band.** `sweeper.usable_span` now takes the smaller of the two
+  limits; FM broadcast is still 12 steps.
+- **A steady carrier means opposite things in different bands.** An AM
+  broadcaster radiates its carrier continuously and only the sidebands follow
+  the programme, so a 50 ms dwell between words measures the carrier alone -
+  which had the scanner reporting every Seattle AM station as "Unmodulated
+  carrier". On the airband a channel is silent unless someone is speaking, so
+  a steady carrier there really is interference. Hence `Band.continuous`:
+  same measurement, opposite meaning, and only the band can tell them apart.
+- **Timings:** AM broadcast 530-1700 kHz at 240 kS/s is **9 steps**, three
+  passes in **4.9 s**, and finds ~23 stations indoors.
+
+## Gain and tuning-range facts
+
+Measured off air on this machine on 2026-08-27, prompted by "I cranked the RF
+gain way up and now I can hear AM, but it's static-y" and "tuning below
+0.5 MHz crashes the whole program". Same rule as the other fact sections:
+don't re-derive them.
+
+- **Gain was chosen once, in `Engine.start`, for whichever band the app
+  opened on.** That is the FM band, the loudest thing the dongle ever sees,
+  so the probe stepped down to **8-12 dB** - and tuning to the AM band kept
+  it. Measured at 710 kHz, 240 kS/s: audio came out at **-59.8 dBFS** on the
+  FM-band gain, **-48.3 dBFS** at the 20 dB a user reaches for by hand, and
+  **-34.9 dBFS** at the 33.8 dB the probe picks for that band. Nothing was
+  clipping at any of the three; it was simply 25 dB of signal left on the
+  table. `Engine.auto_gain()` now re-measures on a band change, on a window
+  change, and on arriving from a scan.
+- **A gain probe is the one thing on the reader thread long enough to
+  starve the audio.** It reads twice per gain setting, and on a strong band
+  it walks most of the R828D's 29-entry table: **~340 ms with no capture, or
+  twice the jitter buffer.** `_run` parks the sink whenever `_gain_pending`
+  is set, the same reasoning as `_begin_scan` - expected underruns in the
+  count are what stop it reporting real faults. With this, a scan, a card
+  click, a hop to 710 kHz and a hop back measured **0 underruns end to end**;
+  without it, 79.
+- **The probe size is the 2.4 MS/s latent bug again.** 32 KB is 6.8 ms at
+  2.4 MS/s and 137 ms at 240 kS/s, which across 29 settings is a four-second
+  freeze. `frontend.probe_bytes_for` derives it from a duration and
+  reproduces the measured 32 KB exactly at the full rate.
+- **De-duplicate the probe.** A band change asks for one and the window
+  change it triggers asks again; two back-to-back probes cost 23 underruns
+  on a single hop to AM. `Engine._gain_pending` collapses them, and must
+  clear in a `finally` or one failed probe wedges every later one.
+- **Click-to-tune could ask for a frequency the dongle cannot reach.** At the
+  bottom of the AM band the window legitimately extends below 500 kHz, so a
+  click on the left of the plot sent 400 kHz to the radio. The digit tuner
+  clamps; `_tune_from_display` was passing its own unclamped value straight
+  past it. `frontend.safe_center_hz` is the guard, applied in `Engine.tune`
+  because that is the one choke point every tuning path goes through.
+- **A device command that raised anything but `RtlSdrError` killed the reader
+  thread, silently.** `Device.center_freq` raises `ValueError` out of range,
+  `_drain_commands` did not catch it, and the thread unwound leaving
+  `errors` at 0 and `last_error` at None - so the app went deaf with a frozen
+  display and nothing upstream could tell why. It now catches every
+  exception: a rejected command is a diagnosable condition, never a reason to
+  stop pumping samples.
+
 ## Scanning facts
 
 Measured off air on this machine on 2026-08-27, with the antenna **indoors,
@@ -235,7 +332,7 @@ bettersdr/
     doctor.py     driver diagnosis via cfgmgr32 (no UI, no PowerShell)
     ringbuffer.py preallocated SPSC byte ring; drops oldest, never blocks
     reader.py     the reader thread + its device-command queue
-    frontend.py   gain selection, shared by listener/GUI/scanner
+    frontend.py   gain selection, safe_sample_rate, safe_center_hz
     engine.py     the DSP thread, device ownership, single-slot mailbox
   dsp/
     convert.py    uint8 -> complex64 LUT
@@ -308,6 +405,24 @@ Device control calls are serialised through a command queue consumed by the read
   descendant through the stylesheet style, and `QLabel` is a `QFrame`, so each
   one starts painting a frame it never asked for. Use a palette, or name the
   content widget.
+- **Anything sized for 2.4 MS/s is a latent bug.** Buffer sizes, block sizes
+  and step plans get written against the default rate and quietly break when
+  the window narrows. Express them as a duration or a fraction of the rate,
+  and check the answer at 240 kS/s as well as at 2.4 MS/s.
+- **Gain belongs to the band, not to the session.** How loud a band is has
+  nothing to do with how loud the last one was, and the difference measures
+  30 dB between FM broadcast and AM. Any moment the front end is pointed at
+  something materially different - a new band, a new window, a card clicked
+  in Discover - re-measures. `Engine.auto_gain` de-duplicates, so callers may
+  ask freely.
+- **Anything that runs on the reader thread stops the radio.** A gain probe
+  is 340 ms of it. Park the audio sink around such work rather than let the
+  underrun count absorb it, and size the work in time so it does not grow
+  tenfold when the window narrows.
+- **The window width is a correctness setting, not a display preference.**
+  `frontend.safe_sample_rate` guards every path that picks a frequency, and it
+  only ever narrows - so a deliberate choice survives unless it would put the
+  upconverter's oscillator on screen instead of a station.
 - Line length 90, ruff with `E,F,I,UP,B,SIM`. Keep `ruff check .` clean.
 
 ## Git

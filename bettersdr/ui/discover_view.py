@@ -254,6 +254,10 @@ class DiscoverView(QWidget):
             band.start_hz,
             band.end_hz,
             threshold_db=SENSITIVITY_DB[self.sensitivity.currentData()],
+            # Some bands need a narrower window than the default - see
+            # `frontend.safe_sample_rate`. The engine clamps this anyway; the
+            # band plan is where the preference is allowed to be stated.
+            sample_rate_hz=band.sample_rate_hz,
         )
 
     def _tick(self) -> None:

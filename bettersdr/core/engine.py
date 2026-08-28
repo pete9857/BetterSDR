@@ -33,12 +33,22 @@ from ..scan.sweeper import (
     SweepResult,
 )
 from .device import DEFAULT_SAMPLE_RATE, Device
-from .frontend import GainChoice, choose_gain
-from .reader import Reader
+from .frontend import GainChoice, choose_gain, safe_center_hz, safe_sample_rate
+from .reader import Reader, read_bytes_for
 
 # How much of the ring to take per pass. 64 KB is ~14 ms at 2.4 MS/s, which
 # keeps the meter and spectrum responsive without making the loop spin.
 DSP_BLOCK_BYTES = 65_536
+# As with the reader's read size, what matters is the span of time a block
+# covers rather than its size in bytes. 64 KB is 14 ms at 2.4 MS/s and 137 ms
+# at 240 kS/s, and handing the audio sink 137 ms of audio at a time - against
+# a 150 ms target buffer - underruns on every block.
+DSP_BLOCK_SECONDS = DSP_BLOCK_BYTES / 2 / 2_400_000
+
+
+def dsp_block_bytes_for(sample_rate_hz: float) -> int:
+    raw = int(sample_rate_hz * 2 * DSP_BLOCK_SECONDS)
+    return max(4_096, (raw // 512) * 512)
 # Spectrum frames per second. Deliberately above the 30 Hz display rate so the
 # GUI never waits on a frame, and far below the block rate so we do not compute
 # frames nobody will look at.
@@ -166,6 +176,8 @@ class Engine:
         self.volume = 0.5
         self.squelch_dbfs: float | None = None
 
+        self._block_bytes = dsp_block_bytes_for(sample_rate)
+        self._carry = np.empty(0, dtype=np.complex64)
         self._spectrum = Spectrum(fft_size=fft_size, sample_rate=float(sample_rate))
         self._demod = demod.create(self.mode, float(sample_rate), volume=self.volume)
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
@@ -180,9 +192,16 @@ class Engine:
         self._sweeper: Sweeper | None = None
         self._scan_source: _ReaderSource | None = None
         self._resume_hz: int | None = None
+        self._resume_rate: int | None = None
         # Set the instant a scan is asked for, cleared when the sweep ends.
         # See `scanning` for why this is not just "is there a sweeper".
         self._scan_wanted = threading.Event()
+        # Set while a gain measurement is queued on the reader thread, so two
+        # callers asking at once produce one probe rather than two.
+        self._gain_pending = threading.Event()
+        # Whether audio is currently parked for the duration of one. See
+        # `_run`; the DSP thread owns this and nothing else touches it.
+        self._sink_parked = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -199,7 +218,9 @@ class Engine:
         # themselves - afterwards only the reader thread may touch it.
         self.gain = choose_gain(self.device)
 
-        self.reader = Reader(self.device)
+        self.reader = Reader(
+            self.device, block_bytes=read_bytes_for(self.sample_rate)
+        )
         self.reader.start()
         self.reader.wait_until_running()
         self.sink = AudioSink(rate=demod.AUDIO_RATE, device=self.audio_device).start()
@@ -240,9 +261,46 @@ class Engine:
         return self._mailbox.peek()
 
     def tune(self, center_hz: int) -> None:
-        self.center_hz = int(center_hz)
+        # Clamped here rather than trusted from the caller: this is the one
+        # choke point every tuning path goes through, and a frequency the
+        # dongle cannot reach is rejected on the reader thread where nobody
+        # can see it. See `frontend.safe_center_hz`.
+        self.center_hz = safe_center_hz(center_hz)
         if self.reader is not None:
             self.reader.tune(self.center_hz)
+
+    def auto_gain(self) -> None:
+        """Re-pick the RF gain for whatever the radio is pointed at now.
+
+        Gain used to be chosen once, in `start`, for whichever band the app
+        happened to open on - and the FM band is the loudest thing the dongle
+        ever sees, so that one measurement stepped the tuner down near the
+        bottom of its range. Tuning from there to the AM band kept the FM
+        setting and the station was barely audible; the fix from the user's
+        side was to find the RF gain control and wind it up by hand, which is
+        exactly the knowledge this app exists to not require.
+
+        Runs on the reader thread because `choose_gain` reads from the device
+        directly and the reader owns it. That blocks capture for the length of
+        the probe, so it belongs at the moments the front end genuinely
+        changed - a new band, a new window width - and not on every retune.
+        """
+        if self.reader is None or self._gain_pending.is_set():
+            # Already queued and not yet run. A band change asks for this and
+            # so does the window change it triggers, and the probe is the one
+            # thing on the reader thread long enough to matter: measured at
+            # ~85 ms on the AM band, where running it twice emptied the audio
+            # buffer and cost 23 underruns for a single hop.
+            return
+        self._gain_pending.set()
+
+        def command(device: Device) -> None:
+            try:
+                self.gain = choose_gain(device)
+            finally:
+                self._gain_pending.clear()
+
+        self.reader.submit(command)
 
     def set_gain(self, gain_db: float) -> None:
         if self.reader is not None:
@@ -258,6 +316,28 @@ class Engine:
         """Swap the demodulator. Runs on the DSP thread, which owns it."""
         self.mode = mode
         self._commands.put(lambda: self._rebuild(mode, bandwidth_hz))
+
+    def set_sample_rate(self, sample_rate_hz: int) -> None:
+        """Change how wide a window the radio looks through.
+
+        Narrowing it is how the HF bands become listenable at all - see
+        `frontend.safe_sample_rate` - so this is a correctness control, not
+        just a display preference. The request is clamped the same way
+        everywhere else is, because a caller asking for a window that reaches
+        0 Hz is asking for the upconverter's oscillator instead of a station.
+        """
+        rate = safe_sample_rate(self.center_hz, preferred_hz=int(sample_rate_hz))
+        if rate == self.sample_rate:
+            return
+        self.sample_rate = rate
+        if self.reader is not None:
+            self.reader.set_sample_rate(rate)
+            # After the rate command, so the probe measures through the new
+            # window. Narrowing it is what moves the upconverter's oscillator
+            # out of view, and the whole point of doing so is the headroom it
+            # frees up - which is only collected by measuring again.
+            self.auto_gain()
+        self._commands.put(lambda: self._apply_sample_rate(rate))
 
     def set_bandwidth(self, bandwidth_hz: float) -> None:
         self._commands.put(lambda: self._rebuild(self.mode, bandwidth_hz))
@@ -292,6 +372,7 @@ class Engine:
         high_hz: float,
         threshold_db: float = DEFAULT_THRESHOLD_DB,
         passes: int = DEFAULT_PASSES,
+        sample_rate_hz: int | None = None,
     ) -> None:
         """Sweep a range and report what is in it.
 
@@ -300,10 +381,17 @@ class Engine:
         """
         if self.reader is None or self.scanning:
             return
+        # The bottom of the range is where the window is most likely to reach
+        # below 0 Hz, so that is what the guard is asked about. Sweeping the
+        # AM band at 2.4 MHz would otherwise report the upconverter's own
+        # oscillator as the strongest station in Seattle.
+        rate = safe_sample_rate(
+            low_hz, preferred_hz=int(sample_rate_hz or self.sample_rate)
+        )
         sweeper = Sweeper(
             low_hz,
             high_hz,
-            float(self.sample_rate),
+            float(rate),
             fft_size=self._spectrum.fft_size,
             threshold_db=threshold_db,
             passes=passes,
@@ -322,7 +410,13 @@ class Engine:
         if self.reader is None:
             return
         self._resume_hz = self.center_hz
+        self._resume_rate = self.sample_rate
         self._sweeper = sweeper
+        if int(sweeper.sample_rate) != self.sample_rate:
+            self.sample_rate = int(sweeper.sample_rate)
+            if self.reader is not None:
+                self.reader.set_sample_rate(self.sample_rate)
+            self._apply_sample_rate(self.sample_rate)
         self._scan_source = _ReaderSource(self.reader)
         if self.sink is not None:
             # Rather than let it starve for the length of the sweep: an
@@ -342,6 +436,15 @@ class Engine:
                     result=sweeper.result(),
                 )
             )
+        if self._resume_rate is not None:
+            # Before the retune, so the reader's queue puts the window back
+            # the way it was and only then moves the tuner.
+            if self._resume_rate != self.sample_rate:
+                self.sample_rate = self._resume_rate
+                if self.reader is not None:
+                    self.reader.set_sample_rate(self.sample_rate)
+                self._apply_sample_rate(self.sample_rate)
+            self._resume_rate = None
         if self._resume_hz is not None:
             self.tune(self._resume_hz)
             self._resume_hz = None
@@ -394,6 +497,34 @@ class Engine:
             )
         )
 
+    def _apply_sample_rate(self, rate: int) -> None:
+        """Rebuild everything that was built around the old rate.
+
+        The spectrum and the demodulator both bake the rate into their filter
+        design, and `_publish_scan_frame` reports this spectrum's bin width
+        alongside the sweeper's data - so letting the two disagree would put
+        every frequency on the display wrong.
+        """
+        # The ring was emptied when the rate changed, so the sink is about to
+        # run dry for as long as it takes to refill. That starvation is
+        # expected, and letting it land in the underrun count is how the one
+        # number that reports a real audio fault stops meaning anything -
+        # measured at 25 underruns for a single hop from FM down to the AM
+        # band. Same reasoning as `_begin_scan`; `start` re-primes with
+        # silence and keeps the running total.
+        if self.sink is not None:
+            self.sink.stop()
+        self._block_bytes = dsp_block_bytes_for(rate)
+        # Samples captured at the old rate must not end up in a frame measured
+        # at the new one.
+        self._carry = np.empty(0, dtype=np.complex64)
+        self._spectrum = Spectrum(
+            fft_size=self._spectrum.fft_size, sample_rate=float(rate)
+        )
+        self._rebuild(self.mode, self._demod.bandwidth_hz)
+        if self.sink is not None:
+            self.sink.start()
+
     def _rebuild(self, mode: str, bandwidth_hz: float | None) -> None:
         self._demod = demod.create(
             mode,
@@ -423,7 +554,24 @@ class Engine:
             if self._sweeper is not None:
                 self._scan_step()
                 continue
-            raw = reader.ring.read(DSP_BLOCK_BYTES, timeout=0.5)
+
+            # A gain probe runs on the reader thread and reads the device
+            # directly, so no samples are captured while it does. That is
+            # brief on a quiet band - it accepts a high gain almost at once -
+            # but on the FM band it walks most of the tuner's table two reads
+            # at a time, measured at about 340 ms, which is twice the jitter
+            # buffer. So audio is parked for the duration rather than left to
+            # starve: an underrun count full of expected underruns cannot
+            # report a real fault. Same reasoning as `_begin_scan`.
+            probing = self._gain_pending.is_set()
+            if probing != self._sink_parked:
+                self._sink_parked = probing
+                if probing:
+                    sink.stop()
+                else:
+                    sink.start()
+
+            raw = reader.ring.read(self._block_bytes, timeout=0.5)
             if raw is None:
                 if reader.last_error:
                     self.last_error = reader.last_error
@@ -433,11 +581,24 @@ class Engine:
             iq = convert.to_complex(raw)
             sink.write(self._demod.process(iq))
 
+            # The display FFT needs a whole frame's worth of samples. A block
+            # is eight frames at 2.4 MS/s but less than one at the 240 kS/s
+            # the AM band uses, so the remainder is carried rather than
+            # dropped - without this the spectrum silently stops updating the
+            # moment the window narrows, while the audio carries on fine.
+            self._carry = (
+                np.concatenate((self._carry, iq)) if self._carry.size else iq
+            )
+            if self._carry.size < self._spectrum.fft_size:
+                continue
+
             now = time.perf_counter()
             if now - last_frame < interval:
+                self._carry = self._carry[-self._spectrum.fft_size :]
                 continue
             last_frame = now
-            spectrum_db = self._spectrum.process(iq)
+            spectrum_db = self._spectrum.process(self._carry)
+            self._carry = np.empty(0, dtype=np.complex64)
             if spectrum_db.size == 0:
                 continue
             squelch = self._demod.squelch

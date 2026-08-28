@@ -28,7 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.device import DEFAULT_SAMPLE_RATE
 from ..core.engine import DisplayFrame, Engine
+from ..core.frontend import GainChoice
 from ..dsp import demod
 from ..dsp.features import detect_hd_radio
 from ..scan import bandplan
@@ -74,6 +76,9 @@ class ListenView(QWidget):
         self._levelled: list[tuple[QWidget, Level]] = []
         self._frames = 0
         self._auto_ranged = False
+        # The GainChoice currently shown in the spin box, so the display
+        # can follow the engine re-picking without fighting the user.
+        self._shown_gain: GainChoice | None = None
         self._started = False
         self._band: bandplan.Band | None = None
 
@@ -267,6 +272,7 @@ class ListenView(QWidget):
         self.spectrum.reset_peak_hold()
         self._update_band_label(hz)
         self._apply_band_defaults(hz)
+        self._guard_window()
 
     def _apply_band_defaults(self, hz: float, force: bool = False) -> None:
         """Take mode and bandwidth from the band plan when the band changes.
@@ -289,6 +295,25 @@ class ListenView(QWidget):
         if index >= 0:
             self.mode.setCurrentIndex(index)
         self.bandwidth.setValue(band.bandwidth_hz / 1000.0)
+        # Only on a band change, for the same reason as the mode: a window
+        # deliberately widened in Expert mode should survive retuning inside
+        # the band it was chosen for.
+        self.engine.set_sample_rate(band.sample_rate_hz or DEFAULT_SAMPLE_RATE)
+        # And re-measure the gain, because how loud a band is has nothing to
+        # do with how loud the last one was. `set_sample_rate` does this too
+        # when it actually changes the window, so this covers the other case:
+        # FM broadcast to the airband, both 2.4 MS/s and 40 dB apart.
+        self.engine.auto_gain()
+
+    def _guard_window(self) -> None:
+        """Re-check the window against the frequency we just moved to.
+
+        Unconditional, unlike the band defaults, because this one only ever
+        narrows: a window reaching below 0 Hz shows the upconverter's
+        oscillator rather than a station, and no user preference makes that
+        the right answer.
+        """
+        self.engine.set_sample_rate(self.engine.sample_rate)
 
     def show_signal(self, signal: Signal) -> None:
         """Tune to something the scanner found, the way it classified it.
@@ -305,7 +330,18 @@ class ListenView(QWidget):
         self.engine.tune(hz)
         self.spectrum.reset_peak_hold()
         self._update_band_label(hz)
-        self._band = bandplan.find(hz)
+        band = bandplan.find(hz)
+        self._band = band
+        self.engine.set_sample_rate(
+            (band.sample_rate_hz if band else None) or DEFAULT_SAMPLE_RATE
+        )
+        self._guard_window()
+        # Unconditionally, not only when the window changed: arriving from a
+        # scan of the airband onto an airband card never changes the rate, and
+        # the gain would still be the one measured on the FM band at startup.
+        # De-duplicated inside the engine, so the common case where the rate
+        # did change still runs one probe rather than two.
+        self.engine.auto_gain()
 
         index = self.mode.findData(signal.mode)
         if index >= 0:
@@ -313,11 +349,18 @@ class ListenView(QWidget):
         self.bandwidth.setValue(signal.demod_bandwidth_hz / 1000.0)
 
     def _tune_from_display(self, hz: float) -> None:
-        """Click-to-tune, snapped to the band's channel raster if it has one."""
+        """Click-to-tune, snapped to the band's channel raster if it has one.
+
+        The frequency the click lands on comes off the plot's x-axis, so it
+        can be anywhere the window reaches - and at the bottom of the AM band
+        the window legitimately extends below the 500 kHz the dongle can tune
+        to. So the readout is set first and the *clamped* value is what the
+        radio is asked for, which also keeps the two showing the same number.
+        """
         band = bandplan.find(hz)
         snapped = band.snap(hz) if band else hz
         self.frequency.set_value(int(round(snapped)))
-        self._tune(int(round(snapped)))
+        self._tune(self.frequency.value_hz)
 
     def _mode_changed(self) -> None:
         mode = self.mode.currentData()
@@ -355,20 +398,33 @@ class ListenView(QWidget):
             # mode choice and the one the classifier just made.
             self._started = True
             self._apply_band_defaults(self.engine.center_hz, force=True)
-        if self.engine.gain is not None:
-            self.gain.blockSignals(True)
-            self.gain.setValue(self.engine.gain.gain_db)
-            self.gain.blockSignals(False)
+        self._sync_gain()
         self._timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+
+    def _sync_gain(self) -> None:
+        """Show what the engine actually picked, if it has picked again.
+
+        Compared by identity rather than value: `choose_gain` replaces the
+        whole `GainChoice`, so this fires exactly when a new measurement lands
+        and never while the user is turning the control themselves.
+        """
+        choice = self.engine.gain
+        if choice is None or choice is self._shown_gain:
+            return
+        self._shown_gain = choice
+        self.gain.blockSignals(True)
+        self.gain.setValue(choice.gain_db)
+        self.gain.blockSignals(False)
 
     def _tick(self) -> None:
         frame = self.engine.latest()
         if frame is None:
             return
         self._frames += 1
+        self._sync_gain()
 
         self.meter.set_level(frame.channel_power_dbfs, frame.squelch_open)
         self.spectrum.update_spectrum(

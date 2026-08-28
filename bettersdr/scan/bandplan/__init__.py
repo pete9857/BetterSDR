@@ -45,6 +45,20 @@ class Band:
     # empty, encrypted or silent most of the time teaches them the app does
     # not work - so which ones appear is part of the data, not a UI decision.
     scan: bool = False
+    # How wide a window to look through in this band, when the default 2.4 MHz
+    # is the wrong answer. AM broadcast is the case that forced it: a 2.4 MHz
+    # window at 710 kHz reaches below 0 Hz, where the upconverter's local
+    # oscillator leak dominates the ADC, and even once that is avoided the
+    # band is crowded enough that a narrow window is worth 30 dB of audio.
+    sample_rate_hz: int | None = None
+    # True where stations transmit around the clock. It decides what a bare
+    # carrier means: AM and FM broadcasters radiate one continuously and their
+    # sidebands rise and fall with the programme, so a short dwell between
+    # words measures the carrier alone. On the airband a channel is silent
+    # unless somebody is speaking, so a steady carrier there is interference.
+    # Same measurement, opposite meaning, and the band is what tells them
+    # apart.
+    continuous: bool = False
 
     @property
     def center_hz(self) -> float:
@@ -99,6 +113,10 @@ def load(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
                 else None
             ),
             scan=bool(entry.get("scan", False)),
+            sample_rate_hz=(
+                int(entry["sample_rate_hz"]) if entry.get("sample_rate_hz") else None
+            ),
+            continuous=bool(entry.get("continuous", False)),
         )
         for entry in raw.get("bands", [])
     ]

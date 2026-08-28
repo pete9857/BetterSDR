@@ -17,10 +17,13 @@ import numpy as np
 import pytest
 
 from bettersdr.scan.sweeper import (
+    DEFAULT_OVERLAP,
+    EDGE_GUARD,
     TUNE_OFFSET_HZ,
     Sweeper,
     plan_steps,
     run_sweep,
+    usable_span,
 )
 
 from . import synth
@@ -286,3 +289,37 @@ def test_an_ordinary_station_is_not_flagged_as_hd():
     signal = result.signals[0]
     assert signal.hd is None or not signal.hd.present
     assert "digital sidebands" not in signal.explanation
+
+
+# -- the tile has to fit inside the part of the window we trust -------------
+
+
+@pytest.mark.parametrize("rate", [240_000, 288_000, 960_000, 1_200_000, 2_400_000])
+def test_a_tile_never_extends_past_the_guard(rate):
+    """The tuner sits off-centre, so the tile's far edge is further out than
+    its width suggests. Where that overshoots the guard, the bottom of every
+    tile is measured and then silently thrown away."""
+    span = usable_span(rate)
+    furthest = span / 2.0 + TUNE_OFFSET_HZ
+    assert furthest <= rate * EDGE_GUARD + 1e-6, rate
+
+
+def test_the_full_rate_plan_is_unchanged():
+    """The FM band's 12 steps are a measured figure; this must not move it."""
+    assert usable_span(2_400_000) == 2_400_000 * (1.0 - DEFAULT_OVERLAP)
+    assert len(plan_steps(88_000_000, 108_000_000, 2_400_000)) == 12
+
+
+def test_no_frequency_in_a_range_falls_between_two_tiles():
+    """KIRO on 710 kHz vanished from a scan of its own band this way."""
+    rate = 240_000
+    steps = plan_steps(530_000, 1_700_000, rate)
+    span = usable_span(rate)
+    for hz in range(530_000, 1_700_001, 1_000):
+        owned = [
+            c for c in steps if c - span / 2.0 <= hz < c + span / 2.0
+        ]
+        assert owned, f"{hz} Hz is in no tile"
+        # And whichever step owns it can actually see it.
+        tuned = owned[0] + TUNE_OFFSET_HZ
+        assert abs(hz - tuned) <= rate * EDGE_GUARD, f"{hz} Hz is owned but discarded"

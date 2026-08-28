@@ -80,11 +80,37 @@ EDGE_GUARD = 0.45
 TUNE_OFFSET_HZ = 37_000
 
 
+def usable_span(
+    sample_rate: float,
+    overlap: float = DEFAULT_OVERLAP,
+    tune_offset_hz: float = TUNE_OFFSET_HZ,
+) -> float:
+    """How much spectrum one step can actually be held responsible for.
+
+    Two limits, and which one binds depends on the rate. The first is the
+    overlap, which is there to keep a signal off the filter roll-off. The
+    second is easy to miss: the tuner sits `tune_offset_hz` away from the tile
+    it is measuring, so the tile's lower edge is that much *further* out in
+    the window than its width suggests, and past `EDGE_GUARD` a bin is in the
+    analog front end's roll-off and under-reports.
+
+    At 2.4 MS/s the offset is 1.5% of the window and this never binds. At the
+    240 kS/s the AM band needs it is 15%, and without it the bottom 19 kHz of
+    every tile was measured and then silently discarded for being too far from
+    centre. KIRO on 710 kHz sat in exactly that sliver and did not appear in a
+    scan of its own band.
+    """
+    by_overlap = sample_rate * (1.0 - overlap)
+    by_guard = 2.0 * (sample_rate * EDGE_GUARD - abs(tune_offset_hz))
+    return max(1.0, min(by_overlap, by_guard))
+
+
 def plan_steps(
     low_hz: float,
     high_hz: float,
     sample_rate: float,
     overlap: float = DEFAULT_OVERLAP,
+    tune_offset_hz: float = TUNE_OFFSET_HZ,
 ) -> tuple[int, ...]:
     """Tile centres covering `low_hz` to `high_hz`, with overlap between them.
 
@@ -100,7 +126,7 @@ def plan_steps(
     if not 0.0 <= overlap < 1.0:
         raise ValueError(f"overlap must be in [0, 1), got {overlap}")
 
-    usable = sample_rate * (1.0 - overlap)
+    usable = usable_span(sample_rate, overlap, tune_offset_hz)
     count = max(1, math.ceil((high_hz - low_hz) / usable))
     if count == 1:
         # A band narrower than one window gets that window centred on it,
@@ -207,8 +233,10 @@ class Sweeper:
         self.region = region
         self.detect_hd = bool(detect_hd)
 
-        self.steps = plan_steps(low_hz, high_hz, sample_rate, overlap)
-        self.tile_hz = sample_rate * (1.0 - overlap)
+        self.steps = plan_steps(
+            low_hz, high_hz, sample_rate, overlap, self.tune_offset_hz
+        )
+        self.tile_hz = usable_span(sample_rate, overlap, self.tune_offset_hz)
         self._spectrum = Spectrum(fft_size=fft_size, sample_rate=self.sample_rate)
         # One pass is one sweep as far as the persistence gate is concerned.
         self._persistence = Persistence(
@@ -515,6 +543,7 @@ def run_sweep(
 
 
 __all__ = [
+    "usable_span",
     "DEFAULT_DWELL_S",
     "DEFAULT_OVERLAP",
     "DEFAULT_PASSES",

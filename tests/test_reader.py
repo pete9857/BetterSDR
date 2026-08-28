@@ -13,8 +13,9 @@ import time
 
 import numpy as np
 
+from bettersdr.audio.output import DEFAULT_TARGET_LATENCY_S
 from bettersdr.core.native import RtlSdrError
-from bettersdr.core.reader import Reader
+from bettersdr.core.reader import DEFAULT_READ_BYTES, READ_SECONDS, Reader, read_bytes_for
 from bettersdr.core.ringbuffer import RingBuffer
 
 
@@ -149,3 +150,82 @@ def test_ring_overruns_when_nothing_consumes():
 
     assert reader.blocks_read > 4
     assert not reader.is_alive()
+
+
+# -- read size follows the rate --------------------------------------------
+
+
+def test_read_size_reproduces_the_measured_default_at_full_rate():
+    """128 KB at 2.4 MS/s is a measured optimum, not a round number."""
+    assert read_bytes_for(2_400_000) == DEFAULT_READ_BYTES
+
+
+def test_read_size_covers_the_same_span_of_time_at_every_rate():
+    for rate in (240_000, 960_000, 1_200_000, 2_400_000):
+        seconds = read_bytes_for(rate) / 2 / rate
+        assert 0.5 * READ_SECONDS <= seconds <= 1.5 * READ_SECONDS, rate
+
+
+def test_read_size_stays_legal_for_read_sync():
+    """`rtlsdr_read_sync` requires a whole number of 512-byte blocks."""
+    for rate in (240_000, 288_000, 960_000, 1_152_000, 2_400_000):
+        assert read_bytes_for(rate) % 512 == 0
+
+
+def test_a_narrow_window_never_reads_longer_than_the_audio_buffer():
+    """The bug this replaced: 128 KB at 240 kS/s is 273 ms per read, against
+    a 150 ms jitter buffer, so every read arrived after the sink had run dry."""
+    for rate in (240_000, 960_000, 2_400_000):
+        assert read_bytes_for(rate) / 2 / rate < DEFAULT_TARGET_LATENCY_S
+
+
+# -- a rejected command must not take the radio with it --------------------
+
+
+class PickyDevice(FakeDevice):
+    """Refuses a frequency outside the dongle's range, as `Device` does."""
+
+    armed = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "center_freq" and self.armed and value < 500_000:
+            raise ValueError(f"{value} Hz is outside the dongle's range")
+        object.__setattr__(self, name, value)
+
+
+def test_a_rejected_tune_does_not_kill_the_reader():
+    """Clicking the spectrum below 500 kHz used to stop the radio dead.
+
+    `Device.center_freq` raises ValueError rather than RtlSdrError, which the
+    command loop did not catch, so the thread unwound and the app went deaf
+    with a frozen display and nothing in `errors` to say why.
+    """
+    device = PickyDevice()
+    device.armed = True
+    reader = Reader(device, block_bytes=4096)
+    reader.start()
+    try:
+        assert reader.wait_until_running()
+        before = reader.blocks_read
+        reader.tune(400_000)
+        assert wait_for(lambda: reader.errors > 0)
+
+        assert reader.is_alive(), "the reader must survive a rejected command"
+        assert wait_for(lambda: reader.blocks_read > before + 3), "still pumping"
+        assert reader.last_error is not None
+    finally:
+        reader.stop()
+
+
+def test_a_rejected_command_is_reported_not_swallowed():
+    device = FakeDevice()
+    reader = Reader(device, block_bytes=4096)
+    reader.start()
+    try:
+        reader.wait_until_running()
+        reader.submit(lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert wait_for(lambda: reader.errors == 1)
+        assert "boom" in (reader.last_error or "")
+        assert reader.is_alive()
+    finally:
+        reader.stop()

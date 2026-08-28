@@ -34,6 +34,23 @@ DEFAULT_CAPACITY_BYTES = 4 * 1024 * 1024
 # latency low enough for the scanner to step quickly.
 DEFAULT_READ_BYTES = 131_072
 
+# What actually matters is the *duration* a read covers, not its size: 128 KB
+# is 27 ms at 2.4 MS/s but 273 ms at 240 kS/s, which is longer than the whole
+# audio jitter buffer and starves it on every read. So the byte count is
+# derived from the rate and this constant is the real setting, chosen to
+# reproduce the measured 128 KB exactly at 2.4 MS/s.
+READ_SECONDS = DEFAULT_READ_BYTES / 2 / 2_400_000
+
+
+def read_bytes_for(sample_rate_hz: float) -> int:
+    """USB read size covering `READ_SECONDS` of radio at this rate.
+
+    `rtlsdr_read_sync` requires a multiple of 512 bytes, and a floor keeps a
+    very narrow window from reducing this to an inefficient dribble.
+    """
+    raw = int(sample_rate_hz * 2 * READ_SECONDS)
+    return max(16_384, (raw // 512) * 512)
+
 Command = Callable[[Device], None]
 
 
@@ -75,6 +92,22 @@ class Reader(threading.Thread):
 
         self.submit(command)
 
+    def set_sample_rate(self, hz: int) -> None:
+        """Change how wide a window the dongle looks through.
+
+        The ring still holds bytes captured at the old rate, and demodulating
+        those at the new one is a burst of noise, so it is emptied here rather
+        than left for the DSP thread to trip over.
+        """
+
+        def command(device: Device) -> None:
+            device.sample_rate = int(hz)
+            self.block_bytes = read_bytes_for(hz)
+            device.reset_buffer()
+            self.ring.clear()
+
+        self.submit(command)
+
     def set_gain(self, db: float | None) -> None:
         def command(device: Device) -> None:
             if db is None:
@@ -104,7 +137,16 @@ class Reader(threading.Thread):
                 return
             try:
                 command(self.device)
-            except RtlSdrError as exc:
+            except Exception as exc:
+                # Deliberately every exception, not just RtlSdrError. A
+                # command that raises anything else used to take the whole
+                # reader thread with it, and silently: `errors` stayed at
+                # zero, so nothing upstream could tell that the radio had
+                # stopped. Clicking the spectrum below 500 kHz did exactly
+                # that - `Device.center_freq` raises ValueError for a
+                # frequency the dongle cannot reach - and the app went deaf
+                # with a frozen display. A rejected command is a diagnosable
+                # condition; it is never a reason to stop pumping samples.
                 self.errors += 1
                 self.last_error = str(exc)
             finally:

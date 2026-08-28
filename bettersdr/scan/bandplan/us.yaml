@@ -17,6 +17,11 @@ bands:
     bandwidth_hz: 10_000
     raster_hz: 10_000
     raster_base_hz: 540_000
+    # A 2.4 MHz window at the bottom of this band reaches below 0 Hz, where
+    # the upconverter's oscillator leak swamps the 8-bit ADC and forces the
+    # gain to its floor. Measured at 710 kHz: 36 dB more audio at this rate.
+    sample_rate_hz: 240_000
+    continuous: true
     icon: radio
     colour: "#c9793a"
     description: >
@@ -66,6 +71,7 @@ bands:
     bandwidth_hz: 200_000
     raster_hz: 200_000
     raster_base_hz: 88_100_000
+    continuous: true
     icon: music
     colour: "#3a7ac9"
     description: >
@@ -139,6 +145,7 @@ bands:
     mode: nfm
     bandwidth_hz: 25_000
     raster_hz: 25_000
+    continuous: true
     icon: cloud
     colour: "#3aa0b0"
     description: >

@@ -8,7 +8,7 @@ that leaves the user wondering whether the radio is simply quiet.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
@@ -117,7 +117,15 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
+        self._status_text = ""
         self._show_status()
+        # The status line reports hardware state that the views change behind
+        # its back - the window narrows to 240 kS/s the moment anyone tunes to
+        # the AM band - so it is polled rather than pushed. Slowly, and only
+        # repainted when the text actually differs.
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._show_status)
+        self._status_timer.start(500)
 
     @staticmethod
     def _explain_failure() -> tuple[str, str]:
@@ -221,12 +229,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No radio connected")
             return
         gain = self.engine.gain
-        parts = [f"{self.engine.sample_rate / 1e6:.1f} MS/s"]
+        rate = self.engine.sample_rate
+        parts = [
+            f"{rate / 1e6:.1f} MS/s"
+            if rate >= 1_000_000
+            else f"{rate / 1e3:.0f} kS/s"
+        ]
         if gain is not None:
             parts.append(f"gain {gain.gain_db:.1f} dB")
             if gain.overloaded:
                 parts.append("front end overloaded - try a shorter antenna")
-        self.statusBar().showMessage("   ".join(parts))
+        text = "   ".join(parts)
+        if text != self._status_text:
+            self._status_text = text
+            self.statusBar().showMessage(text)
 
     # -- lifecycle ---------------------------------------------------------
 

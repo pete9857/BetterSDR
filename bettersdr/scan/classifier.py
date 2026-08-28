@@ -295,7 +295,15 @@ def classify(
         # the width to have been measurable in the first place.
         too_narrow = ratio < WIDTH_TOLERANCE[0]
         measurable = detection.snr_db >= WIDTH_TRUSTED_SNR_DB
-        agrees = not too_wide and not (too_narrow and measurable)
+        # Where stations run around the clock, a steady carrier is not an
+        # anomaly, it is the shape a station has: an AM broadcaster radiates
+        # its carrier continuously and only the sidebands follow the
+        # programme. So a narrow measurement there agrees with the band
+        # rather than contradicting it.
+        carrier_expected = band.continuous and shape.has_carrier
+        agrees = not too_wide and not (
+            too_narrow and measurable and not carrier_expected
+        )
 
         # A bare carrier a fraction of the channel wide, with all its power in
         # one bin, is not a conversation on that channel. Off air with an
@@ -304,7 +312,11 @@ def classify(
         # calling them "Aircraft" would have the app confidently reporting
         # eighty aeroplanes in an empty sky. The band still supplies the mode
         # and bandwidth, so Listen does the sensible thing.
-        bare_carrier = shape.has_carrier and ratio <= WIDTH_TOLERANCE[0]
+        bare_carrier = (
+            shape.has_carrier
+            and ratio <= WIDTH_TOLERANCE[0]
+            and not band.continuous
+        )
         if bare_carrier:
             label, icon, mode = "Unmodulated carrier", "wave", band.mode
             demod_bw = band.bandwidth_hz
@@ -348,6 +360,14 @@ def classify(
                 width_phrase,
                 f"{'wider' if too_wide else 'narrower'} than the "
                 f"{format_bandwidth(band.bandwidth_hz)} expected here",
+                placement,
+            )
+        elif too_narrow and carrier_expected:
+            reasons = (
+                "a steady carrier, which is how stations here transmit",
+                f"only {format_bandwidth(detection.bandwidth_hz)} of it clears "
+                f"the noise right now, because the rest comes and goes with "
+                f"the programme",
                 placement,
             )
         elif too_narrow:
