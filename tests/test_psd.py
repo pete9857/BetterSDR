@@ -86,6 +86,32 @@ def test_dc_offset_does_not_create_a_centre_spike():
     assert spectrum_db[centre] < floor + 10.0
 
 
+def test_removing_dc_does_not_itself_create_a_centre_spike():
+    """The subtler half of the same problem, and the one that shipped.
+
+    Subtracting the plain per-frame mean nulls the *unwindowed* sum, not bin 0.
+    A strong signal off centre leaks into that mean, so removing it writes the
+    leakage back as a real spike at DC - measured 25 dB above the noise floor
+    with one FM station 37 kHz away, which the scanner duly reported as a
+    signal. The window-weighted mean nulls the bin itself and leaves its
+    neighbours alone.
+    """
+    signal = synth.scene(
+        65_536, [synth.fm(65_536, 37_000, amplitude=0.4, rate=RATE)], noise_rms=0.004
+    )
+    spectrum = Spectrum(4096, RATE, remove_dc=True)
+    spectrum_db = spectrum.process(signal)
+
+    centre = spectrum.fft_size // 2
+    floor = noise_floor_db(spectrum_db)
+    assert spectrum_db[centre] < floor
+    # Only the one bin is touched - a wider notch would eat real signals.
+    neighbours = np.concatenate(
+        [spectrum_db[centre - 4 : centre - 1], spectrum_db[centre + 2 : centre + 5]]
+    )
+    assert np.all(neighbours > floor - 5.0)
+
+
 def test_dc_offset_is_visible_when_removal_is_disabled():
     signal = synth.noise(65_536, rms=0.01) + np.complex64(0.5 + 0.5j)
     spectrum = Spectrum(4096, RATE, remove_dc=False)

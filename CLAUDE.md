@@ -19,7 +19,7 @@ Full roadmap and phase breakdown: **[docs/PLAN.md](docs/PLAN.md)**.
 |---|---|
 | **0 — Device layer + Driver Doctor** | **Complete and verified on hardware** |
 | **1 — Listen** (demod, audio, spectrum/waterfall) | **Complete and verified on hardware** |
-| **2 — Discovery** (sweep, detect, classify) | Not started, except HD Radio detection (done) |
+| **2 — Discovery** (sweep, detect, classify) | **Complete and verified on hardware** |
 | **3 — SDR# parity** | Not started |
 | **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | Not started |
 | **5 — Packaging** | Not started |
@@ -164,6 +164,65 @@ sections: don't re-derive them. Full reasoning in **Amendment 3** of docs/PLAN.m
   codec is proprietary with no public spec, and the subprocess boundary keeps
   its GPL lineage from dictating terms for the whole app.
 
+## Scanning facts
+
+Measured off air on this machine on 2026-08-27, with the antenna **indoors,
+about three feet from an exterior wall**. That environment matters for
+interpreting several of these. Same rule as the other fact sections: don't
+re-derive them.
+
+- **Per-frame DC removal must subtract the *window-weighted* mean.** Taking
+  the plain mean nulls the unwindowed sum, not bin 0, and a strong signal off
+  centre leaks into that mean - so removing it writes the leakage back as a
+  real three-bin spike at DC, measured **25 dB above the noise floor** with one
+  FM station 37 kHz away. The scanner duly reported it as a signal. This was a
+  Phase 1 defect in `dsp/psd.py` that only showed up once something was
+  searching the spectrum rather than looking at it.
+- **The sweep parks the tuner 37 kHz off each tile centre.** DC removal blanks
+  the centre bin, and the 25% step overlap does *not* rescue whatever is there:
+  a signal at one step's centre is 1.8 MHz from its neighbours, outside their
+  2.4 MHz windows entirely. The offset keeps the dead bin off every raster in
+  the band plan (5, 10, 12.5, 25, 200 kHz).
+- **The persistence gate's match tolerance has to be a few kHz, not tens.**
+  At 586 Hz per bin, 25 kHz is an 85-bin window: in a quiet band most noise
+  peaks find a partner near where some other one landed last pass, and the gate
+  passes nearly everything. Tightening it to 4 kHz took an FM scan from 43
+  entries to 36 with no real station lost. It is a *different* number from the
+  merge tolerance used across overlapping steps, which stays at 25 kHz.
+- **Spectral flatness cannot tell analog FM from digital.** Real FM carrying
+  music measures 0.7-0.9, indistinguishable from OFDM. Only *synthetic*
+  tone-modulated FM measures 0.45, which is what made 0.6 look like a safe
+  threshold and had the app calling most of the local dial digital. Flatness is
+  now used only where nothing is allocated. What actually identifies a digital
+  signal in a known band is *where* the flat energy sits - the HD sideband test.
+- **A 50 ms dwell measures instantaneous width, not occupied bandwidth.** An FM
+  station caught between phrases collapses to a bare carrier: 98.1 MHz measured
+  **11 kHz wide at 51 dB SNR**. Occupied bandwidth is bounded from below by
+  modulation but not from above, so the sweeper keeps the *widest* view of each
+  channel across passes. That also separates a real station from a spur, since
+  a station widens when somebody talks and a spur never does.
+- **Where a band's channels start is per-band data.** Deriving it as "half a
+  raster in from the band edge" is right for FM broadcast and wrong for most of
+  the rest: it put the NOAA station on 162.550 MHz on screen as 162.537. NOAA
+  starts at the band edge, US FM at 88.1, US AM at 540 kHz with the band edge
+  10 kHz below it. Hence `raster_base_hz`.
+- **The best-view cache is keyed on the channel alone, never on channel plus
+  label.** One transmitter classifies differently from pass to pass, and
+  keying on both put 90.3 MHz on screen twice - once correctly, once as
+  interference.
+- **`Engine.scanning` reports what was *asked for*, not what the DSP thread has
+  got round to.** Starting a scan queues a command, and a view polling at 20 Hz
+  sees "not scanning" in the gap and concludes the sweep already finished.
+- **An indoor aerial fills the airband with stable narrow carriers.** 83 of
+  them, 2 kHz wide, 18-31 dB SNR, surviving every persistence pass - switching
+  supplies and the dongle's own clock, not aircraft. They are real RF and the
+  app reports them, but as "Unmodulated carrier", not as the band's traffic.
+  A bare carrier far narrower than its channel is classified by shape even when
+  the allocation is known.
+- **Timings:** FM broadcast 88-108 MHz is **12 steps**, three passes in
+  **5.1 s**. Weather Radio (150 kHz) is one step, 0.7 s. Nothing is reported
+  until pass two completes, so a list appears about two thirds of the way in.
+
 ## Architecture
 
 ```
@@ -186,14 +245,17 @@ bettersdr/
     features.py   classifier features; HD Radio sideband detection
                   agc.py, denoise.py, correct.py to come
   scan/
-    bandplan/     us.yaml + loader; feeds both the ribbon and the classifier
-                  sweeper.py, detector.py, classifier.py to come
+    bandplan/     us.yaml + loader; feeds the ribbon, the classifier and the
+                  Discover band chips (`scan: true`)
+    detector.py   shaped noise floor, thresholding, grouping, persistence gate
+    classifier.py band plan + shape features -> a labelled, explained Signal
+    sweeper.py    step planning, the scan state machine, stitching
   decode/         rds, adsb, pocsag
   audio/          output.py (jitter buffer + clock drift sync), record.py to come
   ui/
-    app shell     main_window.py, levels.py, listen_view.py
+    app shell     main_window.py, levels.py, listen_view.py, discover_view.py
     widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
-                  colormaps.py, axes.py
+                  colormaps.py, axes.py, signalcard.py, icons.py
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
 tests/
   synth.py        synthetic IQ generator — most tests need no hardware
@@ -204,7 +266,7 @@ tests/
 Three threads, one direction of data flow, no locks on the hot path:
 
 1. **Reader thread** — `rtlsdr_read_sync()` in a loop into a preallocated ring buffer. We use `read_sync` rather than `read_async` because it releases the GIL inside the C call and lets the scanner retune synchronously between reads, so one mechanism serves both listening and scanning.
-2. **DSP thread** — consumes blocks; writes audio into the sounddevice jitter buffer and display frames into a single-slot mailbox.
+2. **DSP thread** — consumes blocks; writes audio into the sounddevice jitter buffer and display frames into a single-slot mailbox. **Scanning runs on this same thread**, taking turns with listening rather than adding a consumer: two things draining one ring would each get half the samples. Audio stops for the length of a sweep, so scan-time starvation cannot pollute the underrun count that reports real faults.
 3. **Qt GUI thread** — a 30 Hz timer reads the latest mailbox value. Never blocks, never touches the device, drops frames rather than queueing them.
 
 Device control calls are serialised through a command queue consumed by the reader thread between reads. **Never call into `Device` from the GUI thread.**
@@ -235,6 +297,17 @@ Device control calls are serialised through a command queue consumed by the read
   spectrum above it puts every frequency wrong by a few hundred kHz.
 - **Widget logic that can be pure, is.** Colour maps, the digit arithmetic and
   the waterfall ring are plain functions tested without a window.
+- **Discover is the landing screen at every level.** Opening on a spectrum is
+  what every other SDR application does; being shown a list of what is actually
+  out there is the argument this one is making.
+- **The classifier says why, and says when it is unsure.** Every `Signal`
+  carries `reasons`; a card with `certain` false is badged BEST GUESS. "Unknown
+  signal" and "Unmodulated carrier" are valid, non-embarrassing answers, and a
+  confident wrong one costs trust in every other line on the screen.
+- **Never set a stylesheet on a `QScrollArea` viewport.** It drags every
+  descendant through the stylesheet style, and `QLabel` is a `QFrame`, so each
+  one starts painting a frame it never asked for. Use a palette, or name the
+  content widget.
 - Line length 90, ruff with `E,F,I,UP,B,SIM`. Keep `ruff check .` clean.
 
 ## Git

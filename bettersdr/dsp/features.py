@@ -174,11 +174,58 @@ def detect_hd_radio(
     )
 
 
+# -- Shape features for the classifier --------------------------------------
+#
+# Both of these are deliberately scale-free: they describe how a signal's power
+# is arranged across its own bandwidth, not how strong it is. A weak FM station
+# and a strong one are the same kind of thing and must classify the same way.
+
+
+def carrier_fraction(spectrum_db: np.ndarray) -> float:
+    """Share of the signal's power sitting in its single strongest bin, 0 to 1.
+
+    This is what separates "has a carrier" from "does not". AM, CW and beacons
+    put a large slice of their power into one discrete frequency; FM and every
+    digital mode spread it across the whole channel. Expressed as a fraction
+    rather than a ratio so the number does not drift with the width of the
+    slice being measured.
+    """
+    if spectrum_db.size == 0:
+        return 0.0
+    power = 10.0 ** (np.asarray(spectrum_db, dtype=np.float64) / 10.0)
+    total = float(power.sum())
+    if total <= 0.0:
+        return 0.0
+    return float(power.max() / total)
+
+
+def spectral_flatness(spectrum_db: np.ndarray) -> float:
+    """Geometric mean over arithmetic mean of power, 0 to 1.
+
+    Near 1 the signal is as featureless as noise across its band, which is
+    what a dense digital mode looks like - the same property the HD Radio
+    sideband test keys on. Near 0 the power is concentrated in a few bins, so
+    there is a carrier or a strong tone. Analog voice lands in between.
+    """
+    if spectrum_db.size == 0:
+        return 0.0
+    power = np.maximum(10.0 ** (np.asarray(spectrum_db, dtype=np.float64) / 10.0), 1e-20)
+    arithmetic = float(power.mean())
+    if arithmetic <= 0.0:
+        return 0.0
+    # Via the mean of the logs, because the product of thousands of tiny
+    # numbers underflows to zero long before it becomes a geometric mean.
+    geometric = float(np.exp(np.mean(np.log(power))))
+    return float(min(1.0, geometric / arithmetic))
+
+
 __all__ = [
     "HD_MAX_FLATNESS_DB",
     "HD_MIN_SNR_DB",
     "HD_SIDEBAND_HI_HZ",
     "HD_SIDEBAND_LO_HZ",
     "HdRadio",
+    "carrier_fraction",
     "detect_hd_radio",
+    "spectral_flatness",
 ]

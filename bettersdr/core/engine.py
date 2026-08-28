@@ -23,6 +23,15 @@ import numpy as np
 from ..audio.output import AudioSink
 from ..dsp import convert, demod
 from ..dsp.psd import DEFAULT_FFT_SIZE, Spectrum
+from ..scan.classifier import Signal
+from ..scan.detector import DEFAULT_THRESHOLD_DB
+from ..scan.sweeper import (
+    DEFAULT_PASSES,
+    DEFAULT_SETTLE_S,
+    Sweeper,
+    SweepProgress,
+    SweepResult,
+)
 from .device import DEFAULT_SAMPLE_RATE, Device
 from .frontend import GainChoice, choose_gain
 from .reader import Reader
@@ -79,6 +88,61 @@ class DisplayFrame:
         return self.center_hz + (np.arange(bins) - bins // 2) * self.bin_width_hz
 
 
+@dataclass(frozen=True)
+class ScanUpdate:
+    """One update from a scan in progress, or the finished article.
+
+    Carries the list found so far as well as the progress, so the discovery
+    screen fills in as the sweep moves rather than staying empty until the end.
+    `result` is set only on the last update.
+    """
+
+    progress: SweepProgress
+    signals: tuple[Signal, ...]
+    result: SweepResult | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.result is not None
+
+
+class _ReaderSource:
+    """Presents the reader thread to a sweeper as something tunable.
+
+    Retuning has to be ordered against the sample stream, which is the whole
+    reason the reader takes commands rather than exposing the device: the
+    command runs between two reads, so once it has run every byte that arrives
+    afterwards is on the new frequency. What is already in the ring is not, and
+    is dropped - measuring the previous step's spectrum at this step's
+    frequency would put signals in the wrong place, which is the one mistake a
+    scanner must not make.
+    """
+
+    def __init__(self, reader: Reader, settle_s: float = DEFAULT_SETTLE_S) -> None:
+        self.reader = reader
+        self.settle_s = float(settle_s)
+
+    def tune(self, hz: int) -> None:
+        retuned = threading.Event()
+
+        def command(device: Device) -> None:
+            device.center_freq = int(hz)
+            device.reset_buffer()
+            retuned.set()
+
+        self.reader.submit(command)
+        retuned.wait(timeout=1.0)
+        if self.settle_s > 0:
+            # The tuner's PLL is still moving for a moment after the register
+            # write, so these samples are neither one frequency nor the other.
+            time.sleep(self.settle_s)
+        self.reader.ring.clear()
+
+    def read(self, samples: int) -> np.ndarray | None:
+        raw = self.reader.ring.read(samples * 2, timeout=2.0)
+        return None if raw is None else convert.to_complex(raw)
+
+
 class Engine:
     """Owns the device, both worker threads, and the audio sink."""
 
@@ -105,9 +169,20 @@ class Engine:
         self._spectrum = Spectrum(fft_size=fft_size, sample_rate=float(sample_rate))
         self._demod = demod.create(self.mode, float(sample_rate), volume=self.volume)
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
+        self._scan_mailbox: Mailbox[ScanUpdate] = Mailbox()
         self._commands: queue.Queue[Callable[[], None]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+
+        # Owned by the DSP thread once a scan starts. Listening and scanning
+        # are the same thread taking turns, not two consumers of one ring:
+        # two things draining the same buffer would each get half the samples.
+        self._sweeper: Sweeper | None = None
+        self._scan_source: _ReaderSource | None = None
+        self._resume_hz: int | None = None
+        # Set the instant a scan is asked for, cleared when the sweep ends.
+        # See `scanning` for why this is not just "is there a sweeper".
+        self._scan_wanted = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -191,7 +266,133 @@ class Engine:
         self.squelch_dbfs = threshold_dbfs
         self._commands.put(lambda: self._rebuild(self.mode, None))
 
+    # -- scanning ----------------------------------------------------------
+
+    @property
+    def scanning(self) -> bool:
+        """Whether a scan is wanted, not whether one has started yet.
+
+        Deliberately not `self._sweeper is not None`. Starting a scan queues a
+        command for the DSP thread, so the sweeper appears a fraction of a
+        second after the caller asks for it - and a view polling at 20 Hz sees
+        "not scanning" in that gap and concludes the scan has already finished.
+        Off air that left the discovery screen stuck on "Listening around
+        108.7 MHz" after a completed sweep, because its one chance to write the
+        summary had been spent before the sweep began.
+        """
+        return self._scan_wanted.is_set()
+
+    def scan_update(self) -> ScanUpdate | None:
+        """The latest news from a scan, or the finished result. Never blocks."""
+        return self._scan_mailbox.peek()
+
+    def start_scan(
+        self,
+        low_hz: float,
+        high_hz: float,
+        threshold_db: float = DEFAULT_THRESHOLD_DB,
+        passes: int = DEFAULT_PASSES,
+    ) -> None:
+        """Sweep a range and report what is in it.
+
+        Audio stops for the duration - the radio is somewhere else entirely
+        for most of it - and resumes on the frequency it was tuned to before.
+        """
+        if self.reader is None or self.scanning:
+            return
+        sweeper = Sweeper(
+            low_hz,
+            high_hz,
+            float(self.sample_rate),
+            fft_size=self._spectrum.fft_size,
+            threshold_db=threshold_db,
+            passes=passes,
+        )
+        self._scan_wanted.set()
+        self._scan_mailbox.put(ScanUpdate(progress=sweeper.progress, signals=()))
+        self._commands.put(lambda: self._begin_scan(sweeper))
+
+    def stop_scan(self) -> None:
+        """Abandon a scan and go back to listening."""
+        self._commands.put(self._end_scan)
+
     # -- DSP thread --------------------------------------------------------
+
+    def _begin_scan(self, sweeper: Sweeper) -> None:
+        if self.reader is None:
+            return
+        self._resume_hz = self.center_hz
+        self._sweeper = sweeper
+        self._scan_source = _ReaderSource(self.reader)
+        if self.sink is not None:
+            # Rather than let it starve for the length of the sweep: an
+            # underrun count is how the audio path reports a real fault, and
+            # filling it with expected ones would make it useless.
+            self.sink.stop()
+
+    def _end_scan(self) -> None:
+        sweeper, self._sweeper = self._sweeper, None
+        self._scan_source = None
+        self._scan_wanted.clear()
+        if sweeper is not None:
+            self._scan_mailbox.put(
+                ScanUpdate(
+                    progress=sweeper.progress,
+                    signals=sweeper.signals(),
+                    result=sweeper.result(),
+                )
+            )
+        if self._resume_hz is not None:
+            self.tune(self._resume_hz)
+            self._resume_hz = None
+        if self.sink is not None:
+            self.sink.start()
+
+    def _scan_step(self) -> None:
+        sweeper, source = self._sweeper, self._scan_source
+        if sweeper is None or source is None:
+            return
+        if sweeper.complete:
+            self._end_scan()
+            return
+
+        source.tune(sweeper.current_hz)
+        iq = source.read(sweeper.dwell_samples)
+        if iq is None:
+            self._end_scan()
+            return
+        sweeper.feed(iq)
+        self._publish_scan_frame(sweeper)
+        self._scan_mailbox.put(
+            ScanUpdate(progress=sweeper.progress, signals=sweeper.signals())
+        )
+        if sweeper.complete:
+            self._end_scan()
+
+    def _publish_scan_frame(self, sweeper: Sweeper) -> None:
+        """Keep the spectrum and waterfall alive while the sweep runs.
+
+        A frozen display for the length of a scan reads as a hang. This shows
+        the window actually moving across the band, which is both honest and
+        the best explanation of what scanning is that the app can give.
+        """
+        spectrum_db = sweeper.last_spectrum_db
+        if spectrum_db is None or self.reader is None:
+            return
+        self._mailbox.put(
+            DisplayFrame(
+                spectrum_db=spectrum_db,
+                center_hz=sweeper.last_center_hz,
+                sample_rate=float(self.sample_rate),
+                bin_width_hz=self._spectrum.bin_width_hz,
+                channel_power_dbfs=float(np.max(spectrum_db)),
+                bandwidth_hz=self._demod.bandwidth_hz,
+                squelch_open=None,
+                audio_latency_s=0.0,
+                underruns=0 if self.sink is None else self.sink.underruns,
+                ring_overruns=self.reader.ring.overruns,
+            )
+        )
 
     def _rebuild(self, mode: str, bandwidth_hz: float | None) -> None:
         self._demod = demod.create(
@@ -219,6 +420,9 @@ class Engine:
 
         while not self._stop.is_set():
             self._drain_commands()
+            if self._sweeper is not None:
+                self._scan_step()
+                continue
             raw = reader.ring.read(DSP_BLOCK_BYTES, timeout=0.5)
             if raw is None:
                 if reader.last_error:
@@ -253,4 +457,4 @@ class Engine:
             )
 
 
-__all__ = ["DisplayFrame", "Engine", "Mailbox"]
+__all__ = ["DisplayFrame", "Engine", "Mailbox", "ScanUpdate"]

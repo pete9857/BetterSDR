@@ -548,3 +548,164 @@ FM broadcast, NOAA weather radio and airband, at all three levels: zero audio
 underruns, zero ring overruns, 4096-bin spectrum at 30 Hz with the waterfall
 scrolling, auto gain, auto mode, and the HD badge correctly lit on 94.9 and
 dark on 162.55.
+
+
+---
+
+# Amendment 5 — Phase 2 findings (2026-08-27)
+
+Phase 2 is built and verified against live air. The shape the plan described —
+sweep, detect, classify, list — survived contact with a real band unchanged.
+What did not survive was several of the *numbers*, and one of the features.
+Every correction below came from pointing the finished scanner at the sky and
+disbelieving the answer.
+
+The antenna for all of this was **indoors, about three feet from an exterior
+wall**. That is worth stating because two findings only make sense in that
+light, and because it is closer to what a beginner's first setup will look
+like than a roof-mounted dipole would be.
+
+## The detector found a bug in Phase 1's spectrum
+
+The first synthetic sweep reported a signal at exactly the tuned frequency of
+every step. It was not a detector fault: `psd.Spectrum` removed DC by
+subtracting each frame's plain mean, which nulls the *unwindowed* sum rather
+than bin 0. A strong signal off centre leaks into that mean, so subtracting it
+writes the leakage back as a genuine three-bin spike at DC — measured 25 dB
+above the noise floor with one FM station 37 kHz away.
+
+Subtracting the window-weighted mean instead nulls the bin exactly and leaves
+its neighbours alone. This had been shipping in the spectrum display since
+Phase 1 and was invisible there: on real hardware the dongle's own DC offset is
+larger than the artefact, so removal still looked like a clear improvement.
+
+**It took something that reads the spectrum numerically to notice.** A display
+is judged by eye, and the eye forgives a small spike in the middle where
+everyone knows there is a DC spike anyway.
+
+## The overlap does not cover the DC blind spot
+
+Removing DC blanks the centre bin, which means every step is blind at its own
+centre. The 25% overlap does not rescue it: with 1.8 MHz of usable tile per
+step, a signal at one step's centre is 1.8 MHz from its neighbours, outside
+their 2.4 MHz windows entirely. Only one step ever sees it, and that step
+deletes it.
+
+The fix is to keep the tile boundaries where they are and park the *tuner* 37
+kHz away from each tile centre. The dead bin then lands on a frequency that is
+not a channel on any raster in the band plan — 5, 10, 12.5, 25 or 200 kHz —
+while the tile stays comfortably inside the window. A transmitter on a
+non-standard frequency can still fall in the notch, which is why the offset is
+a named constant with an argument attached rather than an accident.
+
+## Rule-based classification works, but two of the rules were wrong
+
+The plan's four features were carrier ratio, envelope variance, spectral
+flatness and occupied bandwidth. Three survive. Envelope variance was dropped
+before it was written: it needs time-domain IQ per detection, and the sweep has
+only a PSD per step. The band plan turned out to carry enough prior knowledge
+that it was not missed.
+
+**Spectral flatness cannot separate analog FM from digital.** Synthetic
+tone-modulated FM measures about 0.45 and OFDM about 0.94, which made a
+threshold of 0.6 look generous. Real FM carrying music measures 0.7 to 0.9 —
+programme material spreads energy as smoothly as noise does — so the app
+confidently labelled most of the local dial digital. The synthetic signal was
+misleading precisely because a single tone gives FM a line spectrum that real
+audio never has.
+
+Flatness now only decides where nothing is allocated, and the shape clause says
+only what a power spectrum can support: whether there is a carrier, and whether
+the power is spread out. What actually identifies a digital signal in a known
+band is *where* the flat energy sits, which is what the HD sideband test
+already does properly.
+
+**This is the general lesson of the phase.** A synthetic signal tests the
+arithmetic. It does not test the assumption, because it was built from the same
+assumption.
+
+## Occupied bandwidth is not measurable in one dwell
+
+A 50 ms dwell measures a signal's *instantaneous* width. For anything carrying
+speech or music that is not its bandwidth: an FM station caught between phrases
+collapses to a bare carrier, and 98.1 MHz measured 11 kHz wide at 51 dB SNR —
+strong, narrow, and duly reported as an anomaly rather than as the local
+station it is.
+
+Occupied bandwidth is bounded from below by modulation but not from above, so
+the sweeper keeps the *widest* view of each channel across the passes it is
+already making. That fixes the reporting and, as a side effect, supplies the
+one thing that distinguishes a real station from a spur on a single spectrum:
+**a station widens when somebody talks, and a spur never does.**
+
+## The airband is full of things that are not aircraft
+
+With the aerial indoors, a scan of 118–137 MHz found 83 signals: stable, 2 kHz
+wide, 18–31 dB above the floor, surviving every persistence pass. They are real
+RF — switching supplies, LED drivers, the dongle's own clock — and they sit on
+25 kHz channels because the raster covers the whole band.
+
+Tightening the persistence gate barely touched them, which was the useful
+result: it falsified the assumption that they were noise. A gate that requires
+two sightings in three passes rejects things that move, and these do not move.
+
+So the classifier no longer lets a band match override an obvious shape. A bare
+carrier a fraction of its channel wide, with all its power in one bin, is
+labelled **"Unmodulated carrier"** and described as probable interference,
+whatever is allocated there. The band still supplies the mode and bandwidth, so
+Listen does something sensible. Reporting 83 aeroplanes over an empty sky would
+have been the single most trust-destroying thing the app could do.
+
+The persistence tolerance was wrong too, separately: at 586 Hz per bin, 25 kHz
+is an 85-bin window, wide enough that noise peaks pair up with *each other*
+across passes. Four kilohertz is the right number for matching a signal to
+itself; 25 kHz remains right for merging one signal seen by two overlapping
+steps. They had been the same constant, and were two different questions.
+
+## Channel rasters are per-band data
+
+`Band.snap` derived the first channel as half a raster in from the band edge.
+That is right for US FM broadcast and wrong for most of the rest, and it put
+the NOAA weather station on 162.550 MHz on screen as 162.537 MHz — a wrong
+number in the one place the app is meant to be authoritative. NOAA channels
+start at the band edge, US AM starts at 540 kHz with the band edge 10 kHz
+below, marine VHF counts from 156.025.
+
+`raster_base_hz` is now explicit data, and every raster in the plan is tested
+against a frequency that genuinely exists.
+
+## What the scanner ended up needing from the UI
+
+Two things the plan did not name.
+
+**One channel is one entry, decided after snapping.** Two detections either
+side of a station's dip are 40 kHz apart — outside the merge tolerance — and
+both are 100.1 MHz. Deduplicating on the snapped frequency is what makes them
+one line. Keying on the frequency *and* the label is a trap: one transmitter
+classifies differently from pass to pass, so 90.3 MHz appeared twice, once
+correctly and once as interference.
+
+**Strongest first, like a Wi-Fi picker.** Frequency order reads naturally on a
+clean band and buries the real stations in a dirty one.
+
+## Verified on hardware
+
+Antenna indoors, three feet from an exterior wall.
+
+- **FM broadcast 88–108 MHz** — 12 steps, three passes, **5.1 s**. 38–42
+  stations, every one of them on a real odd-tenth channel, measured centres
+  within a few kHz of the snapped frequency. HD correctly flagged on 94.9,
+  88.5, 96.5, 90.3 and 101.5.
+- **Weather Radio 162.4–162.55 MHz** — one step, 0.7 s. Both nearby NOAA
+  transmitters found on 162.550 and 162.475; the third, audible only as a
+  carrier, honestly reported as one.
+- **Airband 118–137 MHz** — 83 carriers, none claiming to be aircraft.
+- **A quiet synthetic band produces zero entries**, which is the other half of
+  the acceptance criterion and the easier half to lose.
+- **Scan, then Listen** — clicking a card switches to the listening view tuned
+  to 94.9 MHz in WFM at 200 kHz, HD badge lit, **zero audio underruns and zero
+  ring overruns**.
+
+Phase 2's stated done-when was "a cold scan of the FM band lists real stations
+at correct frequencies with no phantom entries, and clicking any card produces
+audio". That is met.

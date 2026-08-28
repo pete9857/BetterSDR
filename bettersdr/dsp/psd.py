@@ -78,13 +78,24 @@ class Spectrum:
 
         block = np.asarray(iq[: frames * self.fft_size], dtype=np.complex64)
         block = block.reshape(frames, self.fft_size)
+        windowed = block * self._window
         if self.remove_dc:
             # The RTL2832U leaves a DC offset that shows up as a permanent
-            # spike at centre. Removing the mean per frame kills it at source,
-            # which is better than patching the bin afterwards and pretending.
-            block = block - block.mean(axis=1, keepdims=True)
+            # spike at centre. Removing it per frame kills it at source, which
+            # is better than patching the bin afterwards and pretending.
+            #
+            # The mean has to be the *window-weighted* one, and it has to be
+            # taken after windowing. Subtracting the plain mean does not null
+            # bin 0 - it nulls the unwindowed sum, and the window then spreads
+            # the difference back out. Worse, a strong signal off centre leaks
+            # into the plain mean, so subtracting it writes that leakage back
+            # as a real three-bin spike at DC: measured 25 dB above the noise
+            # floor with one FM station 37 kHz away. This form makes the DC bin
+            # exactly zero whatever else is in the frame.
+            offset = windowed.sum(axis=1, keepdims=True) / self._window.sum()
+            windowed = windowed - offset * self._window
 
-        spectra = np.fft.fftshift(np.fft.fft(block * self._window, axis=1), axes=1)
+        spectra = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1)
         power = np.mean(np.abs(spectra) ** 2, axis=0) / self._normalisation
 
         if self.smoothing > 0.0 and self._average is not None:

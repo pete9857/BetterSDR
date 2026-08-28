@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -22,6 +23,8 @@ from PySide6.QtWidgets import (
 
 from ..core import doctor
 from ..core.engine import Engine
+from ..scan.classifier import Signal
+from .discover_view import DiscoverView
 from .levels import Level
 from .listen_view import ListenView
 
@@ -30,11 +33,12 @@ QMainWindow, QWidget#root { background: #0b0e13; }
 QStatusBar { background: #10151c; color: #8b98a5; }
 QStatusBar::item { border: none; }
 QWidget#toolbar { background: #10151c; border-bottom: 1px solid #1d232b; }
-QPushButton#level {
+QPushButton#level, QPushButton#nav {
     background: #161b22; color: #8b98a5;
     border: 1px solid #2b323b; padding: 3px 14px;
 }
 QPushButton#level:checked { background: #5ad1ff; color: #0b0e13; font-weight: 600; }
+QPushButton#nav:checked { background: #2b323b; color: #e6edf3; font-weight: 600; }
 QLabel#problemTitle { color: #e6edf3; font-size: 17px; font-weight: 600; }
 QLabel#problemBody { color: #8b98a5; font-size: 12px; }
 """
@@ -80,6 +84,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(WINDOW_STYLE)
         self.engine = engine
         self.view: ListenView | None = None
+        self.discover: DiscoverView | None = None
+        self._stack: QStackedWidget | None = None
 
         root = QWidget()
         root.setObjectName("root")
@@ -94,9 +100,20 @@ class MainWindow(QMainWindow):
             self._levels.setExclusive(False)
             for button in self._levels.buttons():
                 button.setEnabled(False)
+            for button in self._nav.buttons():
+                button.setEnabled(False)
         else:
+            # Discover is the landing screen at every level. Opening on a
+            # spectrum is what every other SDR application does, and being
+            # shown a list of what is actually out there is the entire
+            # argument this one is making.
+            self.discover = DiscoverView(engine, level=level)
             self.view = ListenView(engine, level=level)
-            layout.addWidget(self.view, 1)
+            self.discover.listenRequested.connect(self._listen_to)
+            self._stack = QStackedWidget()
+            self._stack.addWidget(self.discover)
+            self._stack.addWidget(self.view)
+            layout.addWidget(self._stack, 1)
 
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
@@ -135,6 +152,19 @@ class MainWindow(QMainWindow):
         title = QLabel("BetterSDR")
         title.setStyleSheet("color: #e6edf3; font-weight: 600; font-size: 13px;")
         layout.addWidget(title)
+        layout.addSpacing(16)
+
+        self._nav = QButtonGroup(self)
+        self._nav.setExclusive(True)
+        for index, name in enumerate(("Discover", "Listen")):
+            button = QPushButton(name)
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            self._nav.addButton(button, index)
+            layout.addWidget(button)
+        self._nav.idClicked.connect(self._show_page)
+
         layout.addStretch(1)
 
         self._levels = QButtonGroup(self)
@@ -151,8 +181,40 @@ class MainWindow(QMainWindow):
         return bar
 
     def _level_changed(self, value: int) -> None:
-        if self.view is not None:
-            self.view.set_level(Level(value))
+        for page in (self.discover, self.view):
+            if page is not None:
+                page.set_level(Level(value))
+
+    def _show_page(self, index: int) -> None:
+        """Switch views, and stop the one leaving so it costs nothing.
+
+        Both pages poll the engine on a timer. A hidden page that kept polling
+        would repaint widgets nobody can see and, worse, keep asking a scan
+        for progress after the user has walked away from it.
+        """
+        if self._stack is None:
+            return
+        pages = (self.discover, self.view)
+        for position, page in enumerate(pages):
+            if page is None:
+                continue
+            page.start() if position == index else page.stop()
+        self._stack.setCurrentIndex(index)
+        button = self._nav.button(index)
+        if button is not None:
+            button.setChecked(True)
+
+    def _listen_to(self, signal: Signal) -> None:
+        """Somebody pressed Listen on a card."""
+        if self.view is None:
+            return
+        if self.engine is not None and self.engine.scanning:
+            self.engine.stop_scan()
+        # Switch first, then apply: showing the page calls the view's start(),
+        # and applying the signal before that would have the view's own
+        # start-up overwrite the mode the classifier chose.
+        self._show_page(1)
+        self.view.show_signal(signal)
 
     def _show_status(self) -> None:
         if self.engine is None:
@@ -169,13 +231,14 @@ class MainWindow(QMainWindow):
     # -- lifecycle ---------------------------------------------------------
 
     def showEvent(self, event) -> None:
-        if self.view is not None:
-            self.view.start()
+        if self._stack is not None:
+            self._show_page(self._stack.currentIndex())
         super().showEvent(event)
 
     def closeEvent(self, event) -> None:
-        if self.view is not None:
-            self.view.stop()
+        for page in (self.discover, self.view):
+            if page is not None:
+                page.stop()
         if self.engine is not None:
             self.engine.stop()
         super().closeEvent(event)

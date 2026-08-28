@@ -34,6 +34,17 @@ class Band:
     colour: str
     icon: str = ""
     raster_hz: float | None = None
+    # Centre of the band's first channel. Where the channels actually start is
+    # a per-band fact, not something to derive: NOAA weather channels begin at
+    # the band edge, US FM broadcast begins half a channel in at 88.1, and US
+    # AM begins at 540 kHz with the band edge 10 kHz below it. Guessing one
+    # convention for all of them put 162.550 MHz on screen as 162.537.
+    raster_base_hz: float | None = None
+    # Offered as a one-click scan target on the discovery screen. Not every
+    # allocation is worth putting in front of a beginner - a band that is
+    # empty, encrypted or silent most of the time teaches them the app does
+    # not work - so which ones appear is part of the data, not a UI decision.
+    scan: bool = False
 
     @property
     def center_hz(self) -> float:
@@ -50,12 +61,15 @@ class Band:
         """Nearest legal channel centre, if this band has a channel raster.
 
         FM broadcast in the US sits on odd tenths of a megahertz, so snapping
-        turns a rough click on the spectrum into an actual station rather than
-        something 40 kHz off it.
+        turns a rough click on the spectrum - or a detector's centroid a few
+        kilohertz out - into an actual station rather than something 40 kHz
+        off it.
         """
         if not self.raster_hz:
             return hz
-        base = self.start_hz + self.raster_hz / 2.0
+        base = (
+            self.raster_base_hz if self.raster_base_hz is not None else self.start_hz
+        )
         return base + round((hz - base) / self.raster_hz) * self.raster_hz
 
 
@@ -79,10 +93,21 @@ def load(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
             raster_hz=(
                 float(entry["raster_hz"]) if entry.get("raster_hz") else None
             ),
+            raster_base_hz=(
+                float(entry["raster_base_hz"])
+                if entry.get("raster_base_hz")
+                else None
+            ),
+            scan=bool(entry.get("scan", False)),
         )
         for entry in raw.get("bands", [])
     ]
     return tuple(sorted(bands, key=lambda band: band.start_hz))
+
+
+def scannable(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
+    """The bands offered as one-click scan targets, in frequency order."""
+    return tuple(band for band in load(region) if band.scan)
 
 
 def find(hz: float, region: str = DEFAULT_REGION) -> Band | None:
@@ -109,4 +134,4 @@ def overlapping(
     ]
 
 
-__all__ = ["Band", "DEFAULT_REGION", "find", "load", "overlapping"]
+__all__ = ["Band", "DEFAULT_REGION", "find", "load", "overlapping", "scannable"]

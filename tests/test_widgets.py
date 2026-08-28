@@ -92,6 +92,33 @@ def test_format_is_fixed_width_so_the_display_never_reflows():
     assert len(format_digits(0)) == DIGITS
 
 
+# -- Signal icons ----------------------------------------------------------
+
+
+def test_every_band_in_the_plan_has_a_glyph():
+    """A band with no picture is the one that looks broken on the card."""
+    from bettersdr.scan import bandplan
+    from bettersdr.ui.widgets import icons
+
+    for band in bandplan.load():
+        assert band.icon in icons.GLYPHS, f"{band.name} uses icon {band.icon!r}"
+
+
+def test_every_icon_the_classifier_can_invent_has_a_glyph():
+    """The shape-only labels use icons no band plan entry needs to mention."""
+    from bettersdr.ui.widgets import icons
+
+    for name in ("wave", "chip", "walkie", "music", "question"):
+        assert name in icons.GLYPHS
+
+
+def test_an_unknown_icon_falls_back_rather_than_raising():
+    from bettersdr.ui.widgets import icons
+
+    assert icons.glyph("unicorn") == icons.FALLBACK
+    assert icons.glyph("") == icons.FALLBACK
+
+
 # -- Progressive disclosure ------------------------------------------------
 
 

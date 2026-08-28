@@ -10,11 +10,13 @@
 
 bands:
   - name: AM Radio
+    scan: true
     start_hz: 530_000
     end_hz: 1_700_000
     mode: am
     bandwidth_hz: 10_000
     raster_hz: 10_000
+    raster_base_hz: 540_000
     icon: radio
     colour: "#c9793a"
     description: >
@@ -57,11 +59,13 @@ bands:
       talking to each other rather than broadcasting to the public.
 
   - name: FM Radio
+    scan: true
     start_hz: 88_000_000
     end_hz: 108_000_000
     mode: wfm
     bandwidth_hz: 200_000
     raster_hz: 200_000
+    raster_base_hz: 88_100_000
     icon: music
     colour: "#3a7ac9"
     description: >
@@ -80,6 +84,7 @@ bands:
       like tones and morse code rather than speech.
 
   - name: Aircraft
+    scan: true
     start_hz: 118_000_000
     end_hz: 137_000_000
     mode: am
@@ -103,6 +108,7 @@ bands:
       are only overhead for a few minutes at a time.
 
   - name: 2 m Amateur
+    scan: true
     start_hz: 144_000_000
     end_hz: 148_000_000
     mode: nfm
@@ -114,17 +120,20 @@ bands:
       stations that extend their range across a whole city.
 
   - name: Marine VHF
+    scan: true
     start_hz: 156_000_000
     end_hz: 162_025_000
     mode: nfm
     bandwidth_hz: 25_000
     raster_hz: 25_000
+    raster_base_hz: 156_025_000
     icon: boat
     colour: "#3a8ac9"
     description: >
       Boats talking to each other, to harbours, and to the coastguard.
 
   - name: Weather Radio
+    scan: true
     start_hz: 162_400_000
     end_hz: 162_550_000
     mode: nfm
@@ -159,6 +168,7 @@ bands:
       short transmissions.
 
   - name: 70 cm Amateur
+    scan: true
     start_hz: 420_000_000
     end_hz: 450_000_000
     mode: nfm
@@ -181,11 +191,13 @@ bands:
       These send very short bursts and are silent in between.
 
   - name: Walkie-Talkies
+    scan: true
     start_hz: 462_500_000
     end_hz: 467_725_000
     mode: nfm
     bandwidth_hz: 12_500
     raster_hz: 12_500
+    raster_base_hz: 462_562_500
     icon: walkie
     colour: "#8a5a9a"
     description: >

@@ -32,6 +32,7 @@ from ..core.engine import DisplayFrame, Engine
 from ..dsp import demod
 from ..dsp.features import detect_hd_radio
 from ..scan import bandplan
+from ..scan.classifier import Signal
 from .levels import Level
 from .widgets import colormaps
 from .widgets.frequency import FrequencyDisplay
@@ -73,6 +74,7 @@ class ListenView(QWidget):
         self._levelled: list[tuple[QWidget, Level]] = []
         self._frames = 0
         self._auto_ranged = False
+        self._started = False
         self._band: bandplan.Band | None = None
 
         self._build()
@@ -288,6 +290,28 @@ class ListenView(QWidget):
             self.mode.setCurrentIndex(index)
         self.bandwidth.setValue(band.bandwidth_hz / 1000.0)
 
+    def show_signal(self, signal: Signal) -> None:
+        """Tune to something the scanner found, the way it classified it.
+
+        The classifier already decided what this is and how it should be
+        demodulated, so that decision is applied directly rather than
+        re-derived from the band plan. It is usually the same answer, but not
+        always: an AM signal sitting in an amateur band is what the classifier
+        actually saw, and second-guessing it here would be the app disagreeing
+        with the reason it just showed the user.
+        """
+        hz = int(round(signal.frequency_hz))
+        self.frequency.set_value(hz)
+        self.engine.tune(hz)
+        self.spectrum.reset_peak_hold()
+        self._update_band_label(hz)
+        self._band = bandplan.find(hz)
+
+        index = self.mode.findData(signal.mode)
+        if index >= 0:
+            self.mode.setCurrentIndex(index)
+        self.bandwidth.setValue(signal.demod_bandwidth_hz / 1000.0)
+
     def _tune_from_display(self, hz: float) -> None:
         """Click-to-tune, snapped to the band's channel raster if it has one."""
         band = bandplan.find(hz)
@@ -324,7 +348,13 @@ class ListenView(QWidget):
 
     def start(self) -> None:
         self._update_band_label(self.engine.center_hz)
-        self._apply_band_defaults(self.engine.center_hz, force=True)
+        if not self._started:
+            # Only on the very first start. This runs again every time the
+            # user comes back from the discovery screen, and forcing the band
+            # defaults each time would quietly throw away both a deliberate
+            # mode choice and the one the classifier just made.
+            self._started = True
+            self._apply_band_defaults(self.engine.center_hz, force=True)
         if self.engine.gain is not None:
             self.gain.blockSignals(True)
             self.gain.setValue(self.engine.gain.gain_db)
