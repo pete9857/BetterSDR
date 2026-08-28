@@ -1,0 +1,39 @@
+[project]
+name = "bettersdr"
+version = "0.1.0"
+description = "A beginner-friendly SDR receiver for the RTL-SDR Blog V4"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3",
+    "scipy>=1.16",
+    "PySide6>=6.10",
+    "pyqtgraph>=0.13.7",
+    "sounddevice>=0.5.2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+bettersdr = "bettersdr.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bettersdr*"]
+
+[tool.setuptools.package-data]
+bettersdr = ["scan/bandplan/*.yaml"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

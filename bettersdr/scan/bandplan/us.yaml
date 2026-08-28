@@ -1,0 +1,237 @@
+# United States band plan.
+#
+# This file has two jobs, and the second one is the reason it is data rather
+# than code. It labels the ribbon above the spectrum, and it gives the
+# classifier its prior - "this is where FM broadcast lives, and stations there
+# are 200 kHz wide". A second region is a second file, not a second code path.
+#
+# `description` is shown verbatim to a beginner in the "What is this?"
+# expander, so it must read as plain English with no acronyms left cold.
+
+bands:
+  - name: AM Radio
+    start_hz: 530_000
+    end_hz: 1_700_000
+    mode: am
+    bandwidth_hz: 10_000
+    raster_hz: 10_000
+    icon: radio
+    colour: "#c9793a"
+    description: >
+      Ordinary AM radio stations. These travel a long way at night, when the
+      signal bounces off the upper atmosphere, so you may hear places
+      hundreds of miles away.
+
+  - name: Shortwave
+    start_hz: 2_300_000
+    end_hz: 26_100_000
+    mode: am
+    bandwidth_hz: 10_000
+    icon: globe
+    colour: "#a4643a"
+    description: >
+      International broadcasts and long-distance stations. Signals here can
+      cross oceans by bouncing between the ground and the upper atmosphere.
+
+  - name: CB Radio
+    start_hz: 26_965_000
+    end_hz: 27_405_000
+    mode: am
+    bandwidth_hz: 10_000
+    raster_hz: 10_000
+    icon: truck
+    colour: "#8a7a3a"
+    description: >
+      Citizens Band - short-range radio anyone may use without a licence,
+      popular with truck drivers.
+
+  - name: 6 m Amateur
+    start_hz: 50_000_000
+    end_hz: 54_000_000
+    mode: usb
+    bandwidth_hz: 3_000
+    icon: ham
+    colour: "#4a8a5a"
+    description: >
+      A band for licensed amateur radio operators, who are experimenting and
+      talking to each other rather than broadcasting to the public.
+
+  - name: FM Radio
+    start_hz: 88_000_000
+    end_hz: 108_000_000
+    mode: wfm
+    bandwidth_hz: 200_000
+    raster_hz: 200_000
+    icon: music
+    colour: "#3a7ac9"
+    description: >
+      Music and talk stations - the ones your car radio picks up. Many also
+      carry a digital HD signal with extra channels hidden inside.
+
+  - name: Air Navigation
+    start_hz: 108_000_000
+    end_hz: 117_975_000
+    mode: am
+    bandwidth_hz: 25_000
+    icon: nav
+    colour: "#6a6ac9"
+    description: >
+      Navigation beacons that aircraft use to find their way. These sound
+      like tones and morse code rather than speech.
+
+  - name: Aircraft
+    start_hz: 118_000_000
+    end_hz: 137_000_000
+    mode: am
+    bandwidth_hz: 25_000
+    raster_hz: 25_000
+    icon: plane
+    colour: "#5a9ac9"
+    description: >
+      Pilots talking to air traffic control. Quiet most of the time, with
+      short bursts of speech - you will hear more near an airport.
+
+  - name: Weather Satellites
+    start_hz: 137_000_000
+    end_hz: 138_000_000
+    mode: wfm
+    bandwidth_hz: 40_000
+    icon: satellite
+    colour: "#3a9a9a"
+    description: >
+      Passing weather satellites sending down pictures of the clouds. They
+      are only overhead for a few minutes at a time.
+
+  - name: 2 m Amateur
+    start_hz: 144_000_000
+    end_hz: 148_000_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    icon: ham
+    colour: "#4a8a5a"
+    description: >
+      Licensed amateur radio operators, often chatting through repeater
+      stations that extend their range across a whole city.
+
+  - name: Marine VHF
+    start_hz: 156_000_000
+    end_hz: 162_025_000
+    mode: nfm
+    bandwidth_hz: 25_000
+    raster_hz: 25_000
+    icon: boat
+    colour: "#3a8ac9"
+    description: >
+      Boats talking to each other, to harbours, and to the coastguard.
+
+  - name: Weather Radio
+    start_hz: 162_400_000
+    end_hz: 162_550_000
+    mode: nfm
+    bandwidth_hz: 25_000
+    raster_hz: 25_000
+    icon: cloud
+    colour: "#3aa0b0"
+    description: >
+      A continuous recorded forecast for your area, broadcast around the
+      clock by the national weather service.
+
+  - name: Public Service
+    start_hz: 162_550_000
+    end_hz: 174_000_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    icon: shield
+    colour: "#7a7a8a"
+    description: >
+      Government and business two-way radios. Much of this is digital or
+      scrambled and will sound like noise.
+
+  - name: Military Air
+    start_hz: 225_000_000
+    end_hz: 400_000_000
+    mode: am
+    bandwidth_hz: 25_000
+    icon: plane
+    colour: "#6a7a5a"
+    description: >
+      Military aircraft and control towers. Usually silent, with occasional
+      short transmissions.
+
+  - name: 70 cm Amateur
+    start_hz: 420_000_000
+    end_hz: 450_000_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    icon: ham
+    colour: "#4a8a5a"
+    description: >
+      Another band for licensed amateur radio operators, mostly used for
+      local conversations through repeaters.
+
+  - name: Remote Controls
+    start_hz: 433_050_000
+    end_hz: 434_790_000
+    mode: raw
+    bandwidth_hz: 50_000
+    icon: key
+    colour: "#9a7a4a"
+    description: >
+      Car key fobs, doorbells, weather stations and other small gadgets.
+      These send very short bursts and are silent in between.
+
+  - name: Walkie-Talkies
+    start_hz: 462_500_000
+    end_hz: 467_725_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    raster_hz: 12_500
+    icon: walkie
+    colour: "#8a5a9a"
+    description: >
+      The handheld radios sold in pairs for hiking and family use, plus the
+      licensed version of the same service.
+
+  - name: Public Safety
+    start_hz: 764_000_000
+    end_hz: 869_000_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    icon: shield
+    colour: "#7a7a8a"
+    description: >
+      Police, fire and ambulance systems. Most are digital and will sound
+      like a harsh buzz rather than speech.
+
+  - name: ISM 900
+    start_hz: 902_000_000
+    end_hz: 928_000_000
+    mode: raw
+    bandwidth_hz: 200_000
+    icon: chip
+    colour: "#9a7a4a"
+    description: >
+      Utility meters, sensors and cordless gadgets, all sharing one busy
+      stretch of spectrum.
+
+  - name: Aircraft Tracking
+    start_hz: 1_089_000_000
+    end_hz: 1_091_000_000
+    mode: raw
+    bandwidth_hz: 2_000_000
+    icon: plane
+    colour: "#c95a5a"
+    description: >
+      Aircraft continuously broadcasting their identity, position and
+      altitude. This is where flight tracking websites get their data.
+
+  - name: 23 cm Amateur
+    start_hz: 1_240_000_000
+    end_hz: 1_300_000_000
+    mode: nfm
+    bandwidth_hz: 12_500
+    icon: ham
+    colour: "#4a8a5a"
+    description: >
+      A high-frequency amateur radio band, used for local links and
+      experiments.
