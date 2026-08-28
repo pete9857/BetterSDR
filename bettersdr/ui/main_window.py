@@ -22,7 +22,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import doctor
+from ..core.bookmarks import BookmarkStore
 from ..core.engine import Engine
+from ..core.settings import Settings
 from ..scan.classifier import Signal
 from .discover_view import DiscoverView
 from .levels import Level
@@ -76,13 +78,22 @@ class MainWindow(QMainWindow):
     """The whole app."""
 
     def __init__(
-        self, engine: Engine | None = None, level: Level = Level.STANDARD
+        self,
+        engine: Engine | None = None,
+        level: Level = Level.STANDARD,
+        settings: Settings | None = None,
+        bookmarks: BookmarkStore | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("BetterSDR")
         self.resize(1180, 760)
         self.setStyleSheet(WINDOW_STYLE)
         self.engine = engine
+        self.settings = settings
+        # One store shared by both screens, so a frequency saved from a scan
+        # result and one saved while listening land in the same list and the
+        # star on either screen agrees with the other.
+        self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore.open()
         self.view: ListenView | None = None
         self.discover: DiscoverView | None = None
         self._stack: QStackedWidget | None = None
@@ -107,8 +118,15 @@ class MainWindow(QMainWindow):
             # spectrum is what every other SDR application does, and being
             # shown a list of what is actually out there is the entire
             # argument this one is making.
-            self.discover = DiscoverView(engine, level=level)
-            self.view = ListenView(engine, level=level)
+            self.discover = DiscoverView(
+                engine, level=level, bookmarks=self.bookmarks
+            )
+            self.view = ListenView(
+                engine,
+                level=level,
+                settings=settings,
+                bookmarks=self.bookmarks,
+            )
             self.discover.listenRequested.connect(self._listen_to)
             self._stack = QStackedWidget()
             self._stack.addWidget(self.discover)
@@ -189,9 +207,16 @@ class MainWindow(QMainWindow):
         return bar
 
     def _level_changed(self, value: int) -> None:
+        level = Level(value)
         for page in (self.discover, self.view):
             if page is not None:
-                page.set_level(Level(value))
+                page.set_level(level)
+        if self.settings is not None:
+            # Remembered immediately rather than at close: somebody who has
+            # reached Expert should not be met by Simple tomorrow morning, and
+            # a crash is exactly the session where that would happen.
+            self.settings["level"] = level.name.lower()
+            self.settings.save()
 
     def _show_page(self, index: int) -> None:
         """Switch views, and stop the one leaving so it costs nothing.
@@ -239,6 +264,11 @@ class MainWindow(QMainWindow):
             parts.append(f"gain {gain.gain_db:.1f} dB")
             if gain.overloaded:
                 parts.append("front end overloaded - try a shorter antenna")
+        recording = self.engine.recording
+        if recording.active:
+            parts.append("recording")
+        if recording.message:
+            parts.append(recording.message)
         text = "   ".join(parts)
         if text != self._status_text:
             self._status_text = text
@@ -255,7 +285,11 @@ class MainWindow(QMainWindow):
         for page in (self.discover, self.view):
             if page is not None:
                 page.stop()
+        if self.view is not None:
+            self.view.remember()
+        self.bookmarks.save()
         if self.engine is not None:
+            # Stops the radio *and* closes any recording with a valid header.
             self.engine.stop()
         super().closeEvent(event)
 

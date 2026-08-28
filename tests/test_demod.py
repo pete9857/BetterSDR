@@ -204,3 +204,30 @@ def test_output_never_exceeds_full_scale():
     signal = synth.fm(96_000, 0.0, tone_hz=500.0, deviation_hz=200_000.0)
     audio = demod.WfmDemodulator(RATE, volume=4.0).process(signal)
     assert float(np.max(np.abs(audio))) <= 1.0
+
+
+def test_a_sharper_filter_rejects_a_neighbour_a_softer_one_lets_through():
+    """SDR#'s "filter order": more taps per branch, a steeper skirt.
+
+    Planted just outside the channel, where the difference between a 12-tap
+    and a 96-tap branch is the whole point of exposing the control.
+    """
+    rate = 2_400_000.0
+    n = 240_000
+    t = np.arange(n) / rate
+    # 9 kHz off centre with a 12.5 kHz channel: right on the filter's skirt.
+    neighbour = (0.5 * np.exp(2j * np.pi * 9_000.0 * t)).astype(np.complex64)
+
+    leaked = {}
+    for taps in (12, 96):
+        stage = demod.NfmDemodulator(rate, bandwidth_hz=12_500.0, filter_taps=taps)
+        stage.process(neighbour)
+        leaked[taps] = stage.channel_power_dbfs
+
+    assert leaked[96] < leaked[12] - 6.0
+
+
+def test_filter_taps_default_to_the_shared_constant():
+    from bettersdr.dsp.filters import DEFAULT_TAPS_PER_PHASE
+
+    assert demod.create("wfm", 2_400_000.0).filter_taps == DEFAULT_TAPS_PER_PHASE

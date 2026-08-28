@@ -207,10 +207,85 @@ Implements the rest of the parity checklist and wires up the Standard/Expert lev
 
 **Done when:** an SDR# user can do everything they normally do without reaching for another app.
 
+**Status: complete and verified on hardware, 2026-08-28.** Everything above
+ships, plus `core/settings.py` and `core/bookmarks.py`, which the original
+architecture listed but no earlier phase had needed. Two additions to the
+plan as written: `dsp/chain.py` holds the optional stages either side of the
+demodulator rather than leaving a dozen switches loose in the engine, and
+`ui/widgets/panel.py` holds the control column, which went from eight controls
+to about seventy-five at Expert.
+
+Findings worth carrying forward are in **Amendment 6**.
+
+#### Still open at the end of Phase 3
+
+Small gaps against the parity checklist, none of them blocking:
+
+| Item | State |
+|---|---|
+| **Dithering** | **Cannot ship.** `rtlsdr_set_dithering` is not exported by the RTL-SDR Blog Windows release — known since Phase 0. |
+| **FM stereo** | Shipped in Phase 4. See the Phase 4 status block and Amendment 8. |
+| **VFO / transverter offset** | Not done. This is the *display* offset for a transverter — show 144 MHz while tuned to 28 MHz — and is a different feature from the offset tuning that ships. A few lines in `FrequencyDisplay` plus one setting. |
+| **Filter type** | Only windowed-sinc FIR. Filter *order* ships as "filter edge"; the type does not. Low value on 8-bit data. |
+| **Squelch shape** | Hysteresis and the attack/release ramps are implemented but not exposed as controls, only the threshold. |
+| **Audio sample rate** | Deliberately fixed at 48 kHz. `dsp/demod.py` requires the SDR rate to be a whole multiple of it, and making it adjustable would put a resampler in every chain to no audible benefit. Not a gap to close. |
+
+#### Built but not exercised on hardware
+
+Everything in the list below is covered by synthetic tests and was not
+verifiable against real air in this session. Worth putting on the hardware
+checklist rather than assuming.
+
+- **The bias tee.** Deliberately not switched on: it puts 4.5 V down the
+  antenna cable, and the user has equipment connected. The confirmation dialog
+  and the `Device.set_bias_tee` path are both untested end to end.
+- **Swap I/Q**, which needs a source with the opposite convention to show
+  anything.
+- **Choosing a different sound card** at run time.
+- **The noise blanker against real impulse noise.** On the FM band it correctly
+  blanked nothing, because there were no impulses to find.
+- **The recording size and duration caps, and the disk-space guard**, on a
+  recording long enough to reach them.
+- **Import and export in the frequency manager**, which go through file
+  dialogs.
+
 ### Phase 4 — Decoders and polish
 
 - **RDS decoding** — 57 kHz subcarrier, BPSK 1187.5 bps, differential decode, block sync on offset words, group 0A/0B for the station name. This is the single biggest "wow": the discovery list stops saying `FM Radio — 98.5 MHz` and starts saying `KQED 88.5`. Worth the effort.
-- FM stereo (38 kHz pilot-locked L−R subcarrier).
+
+  **Status: complete and verified on hardware, 2026-08-28.** `decode/rds.py`
+  ships the whole chain — subcarrier, symbol timing, carrier tracking, block
+  sync, and groups 0A/0B and 2A/2B — feeding a station name, radio text, PTY,
+  traffic flags, the PI code and the US callsign it encodes. It hangs off
+  `_FmBase.mpx_sink`, is on by default, costs 2.4% of a core, and detaches
+  itself on any mode or bandwidth that cannot carry the subcarrier. Measured
+  block quality on three local stations: **0.97, 0.94, 0.71**. Findings are in
+  **Amendment 7**.
+
+  Two things it deliberately does not do. It does not use the checkword's
+  error-correcting capability, because a mis-corrected block puts plausible
+  wrong text on screen. And it does not run during a sweep — a 50 ms dwell is
+  a twentieth of one group — so the Discover list still names stations from
+  the band plan, and only the listen screen reads them off the air.
+- **FM stereo** — 38 kHz pilot-locked L−R subcarrier.
+
+  **Status: complete and verified on hardware, 2026-08-28.** `dsp/stereo.py`
+  recovers the subcarrier by squaring an analytic 19 kHz pilot, holds the
+  multiplex back by the pilot filter's own group delay so the reference and
+  the signal refer to the same instant, and hands `_FmBase` a matched sum and
+  difference to matrix into L and R. Detection is a pilot-to-guard-band ratio
+  rather than a level, so a mono station is not mistaken for a weak stereo
+  one. It costs 2.0% of a core, is on by default, and detaches on any mode or
+  bandwidth that cannot carry the difference channel. Measured **61 dB** of
+  separation on a synthetic broadcast and locked on every local station
+  tried, at 14–27 dB of pilot margin. Findings are in **Amendment 8**.
+
+  The audio path became mono-or-stereo to carry it: `AudioSink` now opens two
+  channels and conforms whatever it is handed, `ClockSync` stretches both
+  channels onto one grid, `Squelch`, `BiquadState` and `Agc` take a frame axis
+  and share one control signal across channels, and `AudioRecorder` writes
+  either. Audio noise reduction is the one stage that mixes down, and it says
+  so — see the amendment.
 - ADS-B (1090 MHz) → aircraft callsign list; POCSAG → pager text. Both are strong "look what's out there" demos.
 - Favourites, recently played, session history.
 
@@ -709,3 +784,318 @@ Antenna indoors, three feet from an exterior wall.
 Phase 2's stated done-when was "a cold scan of the FM band lists real stations
 at correct frequencies with no phantom entries, and clicking any card produces
 audio". That is met.
+
+---
+
+# Amendment 6 — Phase 3 findings (2026-08-28)
+
+Four decisions changed shape once the parity work met real hardware. None of
+them are visible in a test that only checks that a control does something.
+
+## The demodulator had to give up the end of the audio path
+
+An AGC placed behind a fixed attenuator spends its range undoing it, and one
+placed behind a limiter cannot recover anything the limiter has already
+flattened. Both were true of `Demodulator.process`, which applied volume and
+then clipped.
+
+So the engine now builds every demodulator at unity with the limiter off, and
+`dsp/chain.AudioChain` owns the tail: noise reduction, the audio band-pass,
+the AGC, then volume, then the clip. Verified off air - at volume 0.5 the
+audio measured -6.8 dBFS and at 0.1 it measured -21.9, exactly the 14 dB
+apart the setting implies, with the AGC in circuit.
+
+`listen.py` still uses the demodulator's own volume, which is why this is a
+flag rather than a removal: the Phase 1 acceptance test has to keep working
+with no engine at all.
+
+## IF noise reduction belongs at the IF, and that has a price
+
+Spectral subtraction on the raw 2.4 MS/s stream costs **33% of one core**.
+After the channel filter, at a 240 kHz IF, the same stage costs about **3%**.
+The cost barely moves with FFT size, because it is per-sample work rather than
+per-transform, so there is no way to buy it back by making the transform
+bigger.
+
+That forced a hook inside the demodulator - `Demodulator._front` - and the
+hook has to carry a remainder, because an overlap-add stage returns whole hops
+and the audio decimator after it insists on a multiple of its own factor. It
+also turned out to be the acoustically correct place: noise outside the
+channel is about to be thrown away regardless.
+
+The general lesson is the one from Phase 2 in a new place: **a time constant
+stated per frame means something different at every rate**. 187 frames a
+second at 48 kHz against 9,375 at 2.4 MS/s, so a noise tracker allowed to
+climb "0.4 dB per frame" climbs fifty times faster on the wide window and
+simply follows the signal.
+
+## The calibration assistant had to learn to refuse
+
+The obvious design - tune to a strong broadcast station, measure where its
+carrier lands - produces a confident number from noise. A wideband FM station
+has no carrier to speak of: its energy is spread over 150 kHz and the
+strongest bin wanders with the programme. Six consecutive readings at
+94.9 MHz had a standard deviation of **1814 Hz**, which is 19 ppm.
+
+The same six readings against NOAA weather radio at 162.55 MHz spread by
+**11.5 Hz**, or 0.07 ppm. So the assistant measures the capture in four
+segments, reports the median, and refuses to answer when the segments disagree
+by more than 1 ppm of the carrier — and the dialog asks for a weather-radio or
+AM carrier and says in as many words that an FM music station will not work.
+
+The sign was settled by experiment rather than by argument, because it depends
+on librtlsdr's internals: forcing +50 ppm moved the measured offset by
++8246 Hz at 162.55 MHz, against the +8128 Hz that +50 ppm of that frequency
+comes to. Planting +20 ppm and −15 ppm and running the assistant recovered to
+within 35 Hz in one step from both directions.
+
+Worth knowing for expectations: **this dongle is already accurate to
+0.24 ppm**, because the V4 has a TCXO. The assistant correctly reports 0 ppm
+on it. The feature earns its place on V3s and clones.
+
+## The control column outgrew a form layout
+
+Phase 3 takes the listening screen from eight controls to about seventy-five
+at Expert, which is more than fits on a laptop. `ui/widgets/panel.py` groups
+them under headings in a scroll area, and a section hides itself when every
+row under it belongs to a higher level — otherwise Simple mode is a screen of
+headings with nothing beneath them, which reads as an app that has broken
+rather than one being quiet. Measured at 3 rows under 1 heading in Simple, 27
+under 5 in Standard, 75 under 8 in Expert.
+
+The `QScrollArea` viewport rule from Phase 2 applies here too and is repeated
+in that module: a stylesheet on the viewport drags every descendant through
+the stylesheet style, and `QLabel` is a `QFrame`, so every label starts
+painting a border it never asked for.
+
+## Verified on hardware, 2026-08-28
+
+One session, FM broadcast to the AM band and back, then a full band scan:
+
+| | |
+|---|---|
+| Volume 0.5 → 0.1 | −6.8 → −21.9 dBFS (14 dB, as asked) |
+| Mute | exact silence, not a small number |
+| FFT size changed live | 4096 → 1024 bins, no gap in the audio |
+| Hop to 710 kHz | gain re-measured 3.7 → 29.7 dB, window 2.4 MS/s → 240 kS/s |
+| Back to 94.9 MHz | gain 29.7 → 3.7 dB |
+| Scan of 88–108 MHz | 39 signals in 5.0 s |
+| Recording | 3.0 s audio and IQ, 4.8 MB/s for IQ exactly as documented |
+| **Underruns and ring overruns, whole session** | **0 and 0** |
+
+---
+
+# Amendment 7 — RDS, and a clock that was not where it said it was (2026-08-28)
+
+## The premise the design started from was wrong
+
+The plan for the subcarrier was to lock 57 kHz to the third harmonic of the
+19 kHz stereo pilot, the way the standard says a transmitter builds it. That
+was dropped early for a good reason — it would tie RDS to stereo and lose it
+on mono stations that carry it perfectly well — and replaced with a
+free-running oscillator, on the argument that the multiplex comes out of an FM
+discriminator and so is timed by the dongle's TCXO, which is good to 0.24 ppm.
+0.24 ppm of 57 kHz is 0.014 Hz. Nothing to track.
+
+That argument is wrong, and the measurement says so: the ratio between the
+station's baseband and ours is **98 ppm**. Not the dongle's crystal — the
+whole path, sample rate included. On the subcarrier that is 5.6 Hz, which
+rotates the constellation 28 degrees across a single DSP block, and on the
+symbol clock it is a whole symbol every eight seconds.
+
+The symptom was diagnostic in hindsight. Block quality sat at 0.78 and got
+*worse* as the DSP block grew — 0.59 at 16 KB — which is the signature of a
+per-block estimate being asked to stand in for something that moves within the
+block. Tracking a rate alongside the phase, in both the timing loop and the
+carrier loop, took the same recording from 0.78 to 0.97 and made block size
+stop mattering at all. This is the "anything sized for 2.4 MS/s is a latent
+bug" rule wearing a different hat: a constant that is only right at one block
+size is the same defect whichever end of the chain it sits at.
+
+## An early-late timing detector cannot lock biphase
+
+It was the first thing tried and it produced 19% bit errors while the same
+signal decoded perfectly at a fixed sampling phase — which is how the timing
+loop, rather than the demodulator, was identified as the fault. The reason is
+structural: a biphase symbol correlates almost as strongly against its own
+inverse half a symbol away, so the detector has two stable points and only one
+of them is the symbol.
+
+What replaced it measures the criterion directly — the matched filter read at
+sixteen positions across the symbol, take the largest, refine with a parabola
+through its neighbours. One maximum by construction, and the peak stands out
+by four to seven times over the sixteen symbols one block holds.
+
+## What a station calls itself is not what it sends
+
+Two separate lessons, both from the same field:
+
+- 94.9 MHz alternates `" on KUOW"` and `"NPR's He"` — it scrolls a programme
+  title through the eight characters meant for a name. Confirming each
+  character position separately, which sounds equivalent to confirming the
+  frame, mixes neighbouring frames and yields `"ren KUow"`. Frames are
+  accepted whole and in order; a name is only treated as a name once two
+  identical ones arrive, and otherwise the callsign wins. That also decides
+  what a saved bookmark is called — `KUOW`, not `BBC News`.
+- One corrupt block in a thousand passes its checkword, which over a minute of
+  a weak station is a certainty. One of them put a Los Angeles callsign on
+  102.5 MHz. The identifier now has to arrive twice running.
+
+## The callsign is arithmetic, and stations disagree with it anyway
+
+RBDS encodes most American callsigns as a base-26 number. KUOW (0x4652) and
+KING (0x2678) both come out right. 102.5 MHz sends 0x137A, which decodes to
+KBIG — exactly 0x4000 from the code its own callsign implies. That is the
+station's data and not our arithmetic, and it is worth knowing that a small
+minority of stations will be labelled with somebody else's call. Codes outside
+the two arithmetic ranges get no callsign rather than a guess.
+
+## Verified on hardware, 2026-08-28
+
+Three local stations, indoor aerial, 12 s each:
+
+| Station | PI | Callsign | Radio text | Block quality |
+|---|---|---|---|---|
+| 94.9 | 0x4652 | KUOW | "NPR's Here & Now on KUOW" | 0.97 |
+| 98.1 | 0x2678 | KING | "Edward German, Theme and Six Diversions…" | 0.94 |
+| 102.5 | 0x137A | KBIG | "Seattle's Rock" | 0.71 |
+
+0 audio underruns and 0 ring overruns throughout. The offscreen GUI showed
+`KUOW   News` in the header, `BBC Newshour on KUOW` beneath it, and saved a
+bookmark named `KUOW`.
+
+## Still open in Phase 4
+
+- **Stereo blend on a weak signal.** The difference channel sits at 23–53 kHz
+  where FM noise rises as f², so a weak station is 20 dB noisier in stereo
+  than in mono. Real receivers blend towards mono as the signal drops. The
+  measurements below say the local stations do not need it, but a fringe one
+  will.
+- **Group 4A clock time, and alternate frequencies (0A blocks C/D).** Both are
+  small additions to `RdsDecoder.update`.
+- **HD Radio, ADS-B, POCSAG**, and favourites/recently-played, all untouched.
+- **RDS in the Discover list.** Not possible from a sweep — one group takes
+  87.6 ms and a dwell is 50 ms — so it would need a second pass that parks on
+  each candidate for a second or two. Worth doing, and a different feature
+  from the sweep.
+
+---
+
+## Amendment 8 — FM stereo, and three ways to get a suppressed carrier wrong (2026-08-28)
+
+Stereo is the oldest subcarrier on the FM dial and by far the easiest to
+believe you have working when you have not. Every failure below produces
+audio. Most of them produce *good* audio.
+
+### The three that matter
+
+**A suppressed carrier has to be inferred, and the error is multiplicative.**
+The transmitter sends L−R on a 38 kHz subcarrier it then removes, leaving only
+a 19 kHz pilot to say where it was. Recover that phase 90° out and the
+difference channel is multiplied by cos(90°) — it does not distort, it
+vanishes, and what comes out is a clean mono broadcast. There is no artefact
+to notice. `StereoDecoder` gets the phase by squaring an *analytic* pilot:
+a complex bandpass keeps only positive frequencies, so squaring doubles the
+frequency and carries the phase with it, with no oscillator to lock and no
+loop to tune.
+
+The sign of that square is not a detail. A sine's analytic form is −j·e^{jωt},
+so squaring gives −e^{2jωt} and the imaginary part comes back as −sin(2ωt).
+Left alone, every broadcast plays with its channels swapped — which measures
+as *perfect* separation on any test that only asks how different the two
+channels are. `test_the_channels_are_not_swapped` exists because the headline
+test cannot see this at all.
+
+**A filter's group delay on the pilot is a phase error, not a delay.** The
+bandpass isolating the pilot has to reject audio at 15 kHz and the difference
+channel at 23 kHz, which at a 240 kHz multiplex rate is 289 taps and 144
+samples of delay. That is 0.6 ms — eleven cycles at 19 kHz, so the reference
+would be at an essentially random phase, and the separation would wander with
+the tuning. The fix is to hold the multiplex back by exactly the same 144
+samples, which is why `process` returns the **sum as well as the difference**:
+a caller that took only the difference and used its own undelayed sum would
+put the two ears 0.6 ms apart. Making that impossible is worth more than the
+convenience of a passive tap like the RDS receiver, and it is the one
+structural difference between the two.
+
+**A mono station is not silent at 19 kHz, it is noisy there.** Detecting a
+pilot by asking whether anything is present sets a threshold against the noise
+floor, which moves with the signal, the gain and the band. So the decision is
+a *ratio*: pilot power against a guard band at 16.8 kHz, which is above the
+audio and below the pilot and allocated to nothing on any station. Measured on
+air, the gap is not delicate — five local stations read 13.8 to 27.6 dB and
+the same measurement on a mono broadcast reads about 0.
+
+### Measured
+
+Synthetic broadcast, one channel carrying a 1 kHz tone and the other silent,
+through the whole demodulator at 2.4 MS/s: **61 dB of separation**, and 25 dB
+still under noise at 0.02 amplitude. Off air, indoors:
+
+| Station | Signal | Pilot vs guard | L−R vs L+R | L/R correlation |
+|---|---|---|---|---|
+| 94.9 (KUOW, talk) | −1.4 dBFS | 27.6 dB | −27.9 dB | 0.997 |
+| 98.1 (KING, classical) | −16.8 dBFS | 26.4 dB | −4.7 dB | 0.495 |
+| 102.5 | — | 18.5 dB | −13.1 dB | 0.907 |
+| 88.5 | −15.4 dBFS | 26.8 dB | −0.2 dB | 0.021 |
+| 96.5 | −18.7 dBFS | 21.2 dB | −7.6 dB | 0.706 |
+
+The correlation column is the interesting one, and it needed a second
+measurement to interpret. 88.5 reads 0.021 — two channels sharing almost
+nothing — which is either an unusually wide broadcast or the difference
+channel being noise, and those look identical in a level measurement. The
+separator is *shape*: programme material rolls off towards 15 kHz and noise
+does not. Measured as the fall between the 0.3–3 kHz and 8–15 kHz bands, the
+difference channel tilts 27.5 dB against the sum's 24.8 dB on 88.5 — steeper,
+so it is programme. On 96.5, the weakest of the five, it is 18.6 against 24.3:
+5.7 dB shallower, which is noise starting to show. That is the station a
+stereo blend would eventually be for.
+
+### What the audio path had to become
+
+Stereo is the first thing in this app that is not one number per instant, and
+the path from the demodulator to the sound card assumed it was throughout.
+Rather than a parallel stereo path, every stage now takes a **frame axis**:
+
+- `AudioSink` opens **two** channels whatever the radio is doing, and conforms
+  each block on the way in — mono duplicated, stereo averaged if the device
+  will only take one. The alternative, reopening the stream when the pilot
+  comes and goes, would put a gap in the audio several times a minute on a
+  marginal station. A device that refuses two channels falls back to one
+  rather than failing to play at all.
+- `ClockSync` stretches every channel onto the *same* grid. Resampling them
+  independently — even to a length that rounds differently — is an image that
+  wanders.
+- `Squelch`, `BiquadState` and `Agc` count frames rather than samples and
+  share one control signal across channels. `lfilter` defaults to the trailing
+  axis, which on a `(frames, 2)` block filters the left channel against the
+  right; and two independent gain riders are a stereo image that moves about,
+  which is a far stranger fault than either channel being a decibel off.
+- `AudioRecorder` takes a channel count, fixed when the header is written, and
+  conforms every block to it. A station that drops its pilot mid-recording
+  keeps the file it started rather than producing a WAV that changes channel
+  count halfway — which is not a recoverable file, it is a burst of noise at
+  double speed.
+
+**Spectral noise reduction is the exception, and it says so.** It builds one
+noise estimate and one gain mask per channel; run twice, the two estimates
+diverge and pull the image apart. It is a tool for a weak, hissy, mono signal,
+so `AudioChain` mixes down when it is on and `keeps_stereo` reports it. The
+badge is lit from what actually reached the sound card rather than from the
+pilot, so switching noise reduction on visibly turns stereo off instead of
+leaving a badge that quietly stopped being true.
+
+### Cost and verification
+
+**20 ms per second of radio — 2.0% of a core** at 2.4 MS/s, on top of the
+demodulator's 6.3%. On by default for the same reason as RDS: the difference
+channel is right there in the multiplex, and a broadcast has been in stereo
+since 1961.
+
+Verified through the GUI against live air: the badge lights on 98.1 (with RDS
+reading `KING` in the same header), goes out when the decoder is switched off
+and comes back, stays out on NFM at 162.55 MHz, and lights again on 94.9. A
+two-second recording wrote a genuine two-channel WAV. **1 audio underrun and
+0 ring overruns** across the whole sequence, which included two mode changes,
+a sample-rate change and a recording. The headless CLI still runs mono at
+100.7% capture with 0 underruns.

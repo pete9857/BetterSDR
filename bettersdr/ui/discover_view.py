@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.bookmarks import BookmarkStore, from_signal
 from ..core.engine import Engine, ScanUpdate
 from ..scan import bandplan
 from ..scan.classifier import Signal, format_frequency
@@ -91,11 +92,13 @@ class DiscoverView(QWidget):
         self,
         engine: Engine,
         level: Level = Level.SIMPLE,
+        bookmarks: BookmarkStore | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.engine = engine
         self.level = level
+        self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore()
         self._levelled: list[tuple[QWidget, Level]] = []
         self._cards: list[SignalCard] = []
         self._shown: tuple[tuple[float, str], ...] = ()
@@ -213,8 +216,31 @@ class DiscoverView(QWidget):
         self._levelled.append((sensitivity_label, Level.STANDARD))
         self._levelled.append((self.sensitivity, Level.STANDARD))
 
+        # The one-click route from "the app found these" to "these are mine",
+        # which is the whole reason the frequency manager knows about
+        # `Signal`: a saved scan result keeps the mode and bandwidth the
+        # classifier chose, so recalling it later just works.
+        self.save_found = QPushButton("Save these to my list")
+        self.save_found.setObjectName("band")
+        self.save_found.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_found.setEnabled(False)
+        self.save_found.clicked.connect(self._save_found)
+        row.addWidget(self.save_found)
+        self._levelled.append((self.save_found, Level.STANDARD))
+
         row.addStretch(1)
         return row
+
+    def _save_found(self) -> None:
+        """Add every signal currently listed to the saved frequencies."""
+        signals = [card.signal for card in self._cards]
+        if not signals:
+            return
+        group = self._band.name if self._band is not None else "Found by scanning"
+        for signal in signals:
+            self.bookmarks.add(from_signal(signal, group=group), replace_existing=False)
+        self.bookmarks.save()
+        self.save_found.setText(f"Saved {len(signals)}")
 
     # -- level -------------------------------------------------------------
 
@@ -325,6 +351,9 @@ class DiscoverView(QWidget):
             self.list_layout.insertWidget(self.list_layout.count() - 1, card)
             self._cards.append(card)
         self.empty.setVisible(not signals)
+        # Reset rather than leave "Saved 12" standing over a different list.
+        self.save_found.setEnabled(bool(signals))
+        self.save_found.setText("Save these to my list")
 
     def _clear(self) -> None:
         for card in self._cards:

@@ -11,7 +11,7 @@ moment you listen to a real station.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import firwin, lfilter, oaconvolve, upfirdn
+from scipy.signal import butter, firwin, lfilter, oaconvolve, upfirdn
 
 # Taps per polyphase branch. 24 puts the stopband edge close enough to the new
 # Nyquist for 8-bit data, where the ADC noise floor sits far above the leakage
@@ -152,12 +152,21 @@ class FirDecimator:
 
 
 class BiquadState:
-    """An IIR section run block-by-block, carrying `lfilter` state across."""
+    """An IIR section run block-by-block, carrying `lfilter` state across.
+
+    Accepts mono `(frames,)` or multi-channel `(frames, channels)` blocks and
+    filters along the frame axis, keeping one state per channel. An identical
+    filter on each channel is what leaves a stereo image where it was; running
+    the default trailing-axis filter over a `(frames, 2)` block would filter
+    *across* the two channels, which is not a mistake anybody hears as a
+    filter going wrong.
+    """
 
     def __init__(self, b: np.ndarray, a: np.ndarray) -> None:
         self._b = np.asarray(b, dtype=np.float64)
         self._a = np.asarray(a, dtype=np.float64)
-        self._zi = np.zeros(max(self._a.size, self._b.size) - 1)
+        self._order = max(self._a.size, self._b.size) - 1
+        self._zi = np.zeros(self._order)
 
     def reset(self) -> None:
         self._zi[:] = 0
@@ -165,8 +174,42 @@ class BiquadState:
     def process(self, samples: np.ndarray) -> np.ndarray:
         if samples.size == 0:
             return samples.astype(np.float32)
-        out, self._zi = lfilter(self._b, self._a, samples, zi=self._zi)
+        wanted = (self._order, *samples.shape[1:])
+        if self._zi.shape != wanted:
+            # A channel count change starts the filter afresh rather than
+            # carrying state that belonged to a different signal.
+            self._zi = np.zeros(wanted)
+        out, self._zi = lfilter(self._b, self._a, samples, axis=0, zi=self._zi)
         return out.astype(np.float32)
+
+
+class BandPass(BiquadState):
+    """Trim the audio to the range that carries speech, and nothing else.
+
+    SDR# calls this "filter audio", and on a noisy channel it is worth more
+    than it sounds: most of what makes weak SSB tiring to listen to is hiss
+    above 3 kHz and rumble below 300 Hz, neither of which carries any of the
+    voice. Cutting them does not improve the signal-to-noise ratio of the
+    part you are listening to, but it removes the part you are not.
+
+    An IIR rather than an FIR because it runs at the audio rate, where a
+    fourth-order section costs nothing and the phase response does not matter
+    to a listener.
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        low_hz: float = 300.0,
+        high_hz: float = 3_000.0,
+        order: int = 4,
+    ) -> None:
+        nyquist = sample_rate / 2.0
+        low = max(1.0, min(low_hz, nyquist * 0.9))
+        high = max(low + 1.0, min(high_hz, nyquist * 0.98))
+        self.low_hz, self.high_hz = low, high
+        b, a = butter(order, [low, high], btype="band", fs=sample_rate)
+        super().__init__(b, a)
 
 
 class Deemphasis(BiquadState):
@@ -262,12 +305,18 @@ class Squelch:
         target = 1.0 if self._open else 0.0
         if self._gain == target:
             return audio if target == 1.0 else np.zeros_like(audio)
+        # Frames, not samples: stereo audio arrives as (frames, 2) and one
+        # ramp has to cover both channels, or the gate opens on the left ear
+        # twice as fast as on the right.
+        frames = audio.shape[0]
         step = 1.0 / (self._attack if target > self._gain else self._release)
         ramp = self._gain + np.sign(target - self._gain) * step * np.arange(
-            1, audio.size + 1, dtype=np.float32
+            1, frames + 1, dtype=np.float32
         )
         np.clip(ramp, min(self._gain, target), max(self._gain, target), out=ramp)
         self._gain = float(ramp[-1])
+        if audio.ndim > 1:
+            ramp = ramp.reshape(-1, *([1] * (audio.ndim - 1)))
         return (audio * ramp).astype(np.float32)
 
 
@@ -280,6 +329,7 @@ def power_dbfs(samples: np.ndarray) -> float:
 
 
 __all__ = [
+    "BandPass",
     "BiquadState",
     "DcBlock",
     "Deemphasis",

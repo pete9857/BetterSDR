@@ -5,6 +5,11 @@ plugged in, or one still bound to the Windows TV driver - so failure here
 opens the window on an explanation rather than printing a traceback and
 exiting. A beginner staring at a closed app has no way forward; a beginner
 looking at numbered steps does.
+
+Every command-line option defaults to "whatever was remembered", not to a
+constant. That is what lets the app open where it was left without making the
+flags useless: an option given explicitly always wins, and one left out falls
+back to the settings file, which falls back to a sensible default of its own.
 """
 
 from __future__ import annotations
@@ -14,9 +19,10 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from .core.device import DEFAULT_SAMPLE_RATE, device_count
+from .core.bookmarks import BookmarkStore
+from .core.device import device_count
 from .core.engine import Engine
-from .dsp.psd import DEFAULT_FFT_SIZE
+from .core.settings import Settings
 from .ui.levels import Level
 from .ui.main_window import MainWindow
 
@@ -26,17 +32,25 @@ def build_parser() -> argparse.ArgumentParser:
         prog="bettersdr", description="A beginner-friendly SDR receiver."
     )
     parser.add_argument(
-        "--freq", default="98.5", help="starting frequency in MHz, or in Hz if large"
+        "--freq",
+        default=None,
+        help="starting frequency in MHz, or in Hz if large",
     )
-    parser.add_argument("--rate", type=int, default=DEFAULT_SAMPLE_RATE)
-    parser.add_argument("--fft", type=int, default=DEFAULT_FFT_SIZE)
+    parser.add_argument("--rate", type=int, default=None)
+    parser.add_argument("--fft", type=int, default=None)
     parser.add_argument(
         "--level",
-        default="standard",
+        default=None,
         choices=[level.name.lower() for level in Level],
         help="how much of the radio to show",
     )
     parser.add_argument("--audio-device", default=None, help="index or name substring")
+    parser.add_argument("--ppm", type=int, default=None, help="crystal correction")
+    parser.add_argument(
+        "--no-settings",
+        action="store_true",
+        help="ignore and do not write the saved settings",
+    )
     return parser
 
 
@@ -48,8 +62,19 @@ def parse_frequency(text: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    settings = Settings()
+    if args.no_settings:
+        settings.reset()
 
-    audio_device: int | str | None = args.audio_device
+    level_name = args.level or str(settings["level"])
+    frequency = (
+        parse_frequency(args.freq)
+        if args.freq is not None
+        else int(settings["frequency_hz"])
+    )
+    audio_device: int | str | None = (
+        args.audio_device if args.audio_device is not None else settings["audio_device"]
+    )
     if isinstance(audio_device, str) and audio_device.isdigit():
         audio_device = int(audio_device)
 
@@ -59,15 +84,25 @@ def main(argv: list[str] | None = None) -> int:
     engine: Engine | None = None
     if device_count() > 0:
         engine = Engine(
-            sample_rate=args.rate, fft_size=args.fft, audio_device=audio_device
+            sample_rate=args.rate or 2_400_000,
+            fft_size=args.fft or int(settings["fft_size"]),
+            audio_device=audio_device,
         )
+        engine.ppm = args.ppm if args.ppm is not None else int(settings["ppm"])
+        engine.volume = float(settings["volume"])
+        engine.audio.volume = engine.volume
         try:
-            engine.start(parse_frequency(args.freq))
+            engine.start(frequency)
         except Exception:  # noqa: BLE001 - any failure here is a setup problem
             engine.stop()
             engine = None
 
-    window = MainWindow(engine, level=Level[args.level.upper()])
+    window = MainWindow(
+        engine,
+        level=Level[level_name.upper()],
+        settings=None if args.no_settings else settings,
+        bookmarks=BookmarkStore.open(),
+    )
     window.show()
     return app.exec()
 

@@ -53,19 +53,28 @@ class ClockSync:
         self.ratio = 1.0
 
     def resample(self, audio: np.ndarray, buffered: int) -> np.ndarray:
-        if audio.size < 2:
+        frames = audio.shape[0]
+        if frames < 2:
             return audio
         error = (self.target_samples - buffered) / self.target_samples
         self.ratio = 1.0 + float(
             np.clip(self.gain * error, -self.max_correction, self.max_correction)
         )
-        wanted = max(2, int(round(audio.size * self.ratio)))
-        if wanted == audio.size:
+        wanted = max(2, int(round(frames * self.ratio)))
+        if wanted == frames:
             return audio
         # Both endpoints are preserved, so blocks still join without a step.
-        source = np.arange(audio.size, dtype=np.float32)
-        target = np.linspace(0.0, audio.size - 1, wanted, dtype=np.float32)
-        return np.interp(target, source, audio).astype(np.float32)
+        source = np.arange(frames, dtype=np.float32)
+        target = np.linspace(0.0, frames - 1, wanted, dtype=np.float32)
+        if audio.ndim == 1:
+            return np.interp(target, source, audio).astype(np.float32)
+        # Every channel is stretched by the same ratio onto the same grid, so
+        # the two ears stay sample-aligned. Resampling them independently -
+        # even by rounding to a different length - is an image that wanders.
+        out = np.empty((wanted, audio.shape[1]), dtype=np.float32)
+        for channel in range(audio.shape[1]):
+            out[:, channel] = np.interp(target, source, audio[:, channel])
+        return out
 
 
 def output_devices() -> list[tuple[int, str]]:
@@ -85,7 +94,14 @@ def default_output_device() -> str:
 
 
 class AudioSink:
-    """A mono float32 output stream fed from another thread."""
+    """A float32 output stream fed from another thread.
+
+    Opened with two channels whatever the radio is doing, and a mono block is
+    duplicated into both on the way in. That costs one copy of a 48 kHz stream
+    and buys the thing that matters: FM stereo comes and goes with the pilot,
+    several times a minute on a marginal station, and reopening the sound card
+    at each transition would put a gap in the audio every time.
+    """
 
     def __init__(
         self,
@@ -94,9 +110,11 @@ class AudioSink:
         target_latency_s: float = DEFAULT_TARGET_LATENCY_S,
         max_latency_s: float = DEFAULT_MAX_LATENCY_S,
         drift_correction: bool = True,
+        channels: int = 2,
     ) -> None:
         self.rate = int(rate)
         self.device = device
+        self.channels = max(1, int(channels))
         self.target_samples = int(self.rate * target_latency_s)
         self.max_samples = int(self.rate * max_latency_s)
         self.underruns = 0
@@ -117,22 +135,65 @@ class AudioSink:
         # Priming with silence means the first real audio arrives into a
         # buffer that already has depth, instead of underrunning immediately.
         self.write(np.zeros(self.target_samples, dtype=np.float32))
-        self._stream = sd.OutputStream(
+        self._stream = self._open()
+        self._stream.start()
+        return self
+
+    def _open(self) -> sd.OutputStream:
+        """Open the stream, dropping to mono if the device refuses two.
+
+        Essentially every sound card does two channels, but a virtual or
+        telephony device may not, and being unable to play anything at all is
+        a far worse outcome than being unable to play it in stereo.
+        """
+        try:
+            return self._stream_with(self.channels)
+        except Exception:  # noqa: BLE001 - fall back rather than go silent
+            if self.channels == 1:
+                raise
+        self.channels = 1
+        self.flush()
+        self.write(np.zeros(self.target_samples, dtype=np.float32))
+        return self._stream_with(1)
+
+    def _stream_with(self, channels: int) -> sd.OutputStream:
+        return sd.OutputStream(
             samplerate=self.rate,
-            channels=1,
+            channels=channels,
             dtype="float32",
             device=self.device,
             callback=self._callback,
         )
-        self._stream.start()
-        return self
 
     def stop(self) -> None:
-        if self._stream is None:
-            return
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        # Outside the branch on purpose: stopping an already-stopped sink must
+        # still leave it empty, so a caller cannot end up with a primed buffer
+        # it believes it discarded.
+        self.flush()
+
+    def flush(self) -> None:
+        """Throw away anything still queued.
+
+        Called on every stop, and that is the whole point of it. The sink is
+        parked for a gain probe, a sample-rate change or a sweep, and in every
+        one of those cases the audio still sitting in the buffer was captured
+        under conditions that no longer apply. Worse, `start` primes with a
+        fresh target buffer of silence, so keeping the old contents *adds*
+        150 ms of latency to every park and never gives it back.
+
+        Measured on air: one gain probe took the buffer from 190 ms to 369 ms,
+        where it stayed - and after a few more it sat against the 400 ms cap
+        discarding blocks to stay there, which is a third of a second of audio
+        lagging behind the display for the rest of the session.
+        """
+        with self._lock:
+            self._blocks.clear()
+            self._buffered = 0
+            self._offset = 0
 
     def __enter__(self) -> AudioSink:
         return self.start()
@@ -146,19 +207,41 @@ class AudioSink:
     def latency_s(self) -> float:
         return self._buffered / self.rate
 
+    def _conform(self, audio: np.ndarray) -> np.ndarray:
+        """Reshape a block to the channel count the stream was opened with.
+
+        Mono is duplicated rather than placed on the left, and stereo is
+        averaged rather than truncated: either shortcut would play half the
+        broadcast on a device that cannot do better.
+        """
+        block = np.ascontiguousarray(audio, dtype=np.float32)
+        if block.ndim == 1:
+            block = block[:, None]
+        if block.shape[1] == self.channels:
+            return block
+        if block.shape[1] == 1:
+            return np.ascontiguousarray(np.repeat(block, self.channels, axis=1))
+        return np.ascontiguousarray(
+            np.repeat(block.mean(axis=1, keepdims=True), self.channels, axis=1)
+        )
+
     def write(self, audio: np.ndarray) -> None:
-        """Queue audio for playback. Safe to call from the DSP thread."""
+        """Queue audio for playback. Safe to call from the DSP thread.
+
+        Takes mono `(frames,)` or `(frames, channels)`; either is conformed to
+        what the stream was opened with.
+        """
         if audio.size == 0:
             return
-        block = np.ascontiguousarray(audio, dtype=np.float32)
+        block = self._conform(audio)
         if self.clock is not None:
             block = self.clock.resample(block, self._buffered)
         with self._lock:
             self._blocks.append(block)
-            self._buffered += block.size
+            self._buffered += block.shape[0]
             while self._buffered > self.max_samples and len(self._blocks) > 1:
                 oldest = self._blocks.popleft()
-                self._buffered -= oldest.size - self._offset
+                self._buffered -= oldest.shape[0] - self._offset
                 self._offset = 0
                 self.dropped_blocks += 1
 
@@ -171,21 +254,22 @@ class AudioSink:
         time_info: object,
         status: sd.CallbackFlags,
     ) -> None:
-        out = outdata[:, 0]
         filled = 0
         with self._lock:
             while filled < frames and self._blocks:
                 block = self._blocks[0]
-                take = min(frames - filled, block.size - self._offset)
-                out[filled : filled + take] = block[self._offset : self._offset + take]
+                take = min(frames - filled, block.shape[0] - self._offset)
+                outdata[filled : filled + take] = block[
+                    self._offset : self._offset + take
+                ]
                 filled += take
                 self._offset += take
-                if self._offset >= block.size:
+                if self._offset >= block.shape[0]:
                     self._blocks.popleft()
                     self._offset = 0
             self._buffered -= filled
         if filled < frames:
-            out[filled:] = 0.0
+            outdata[filled:] = 0.0
             self.underruns += 1
 
 

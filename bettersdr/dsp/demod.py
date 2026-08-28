@@ -23,7 +23,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .filters import DcBlock, Deemphasis, Discriminator, FirDecimator, Squelch, power_dbfs
+from .filters import (
+    DEFAULT_TAPS_PER_PHASE,
+    DcBlock,
+    Deemphasis,
+    Discriminator,
+    FirDecimator,
+    Squelch,
+    power_dbfs,
+)
 
 AUDIO_RATE = 48_000
 
@@ -85,15 +93,29 @@ class Demodulator:
         audio_rate: int = AUDIO_RATE,
         squelch_dbfs: float | None = None,
         volume: float = 0.5,
+        filter_taps: int = DEFAULT_TAPS_PER_PHASE,
     ) -> None:
         self.sample_rate = float(sample_rate)
+        # Taps per polyphase branch in the channel filter. SDR# calls this the
+        # filter order; more of them sharpens the skirt at linear CPU cost,
+        # which is what lets a strong neighbour be pushed off a weak channel.
+        self.filter_taps = max(4, int(filter_taps))
         self.audio_rate = int(audio_rate)
         self.bandwidth_hz = float(
             bandwidth_hz if bandwidth_hz is not None else self.default_bandwidth_hz
         )
         self.volume = float(volume)
         self.channel_power_dbfs = -120.0
+        # Optional IF-rate stage, installed by the engine when the user turns
+        # on IF noise reduction. It belongs here rather than on the raw stream
+        # because after the channel filter there are ten to fifty times fewer
+        # samples - measured at 33% of a core on the full 2.4 MS/s window
+        # against 3% at a 240 kHz IF - and because noise outside the channel
+        # is about to be thrown away regardless.
+        self.if_stage: object | None = None
+        self.clip = True
         self._pending = np.zeros(0, dtype=np.complex64)
+        self._if_carry = np.zeros(0, dtype=np.complex64)
         self._build()
         self.squelch = (
             None
@@ -122,9 +144,35 @@ class Demodulator:
 
     def reset(self) -> None:
         self._pending = np.zeros(0, dtype=np.complex64)
+        self._if_carry = np.zeros(0, dtype=np.complex64)
         for stage in vars(self).values():
             if hasattr(stage, "reset") and stage is not self:
                 stage.reset()
+
+    def _front(self, iq: np.ndarray) -> np.ndarray:
+        """Channel-filter a block, measure it, and run the optional IF stage.
+
+        Every mode did the first two lines of this itself. Sharing them also
+        gives the IF stage one place to live, and one place to solve the
+        problem it creates: an overlap-add stage returns whole hops rather
+        than whatever it was handed, and the audio decimator that follows
+        insists on a multiple of its own factor. So the remainder is carried
+        here, exactly as `process` carries the remainder of the input.
+
+        The level is measured *before* the IF stage on purpose. It drives the
+        squelch and the meter, and both should report what the radio actually
+        received rather than what noise reduction made of it.
+        """
+        channel = self.channel.process(iq)
+        self.channel_power_dbfs = power_dbfs(channel)
+        if self.if_stage is None:
+            return channel
+        channel = self.if_stage.process(channel)
+        if self._if_carry.size:
+            channel = np.concatenate((self._if_carry, channel))
+        usable = channel.size - (channel.size % self.audio_factor)
+        self._if_carry = channel[usable:].copy()
+        return channel[:usable]
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         """Demodulate a block of complex baseband into float32 audio."""
@@ -141,6 +189,12 @@ class Demodulator:
             self.squelch.update(self.channel_power_dbfs)
             audio = self.squelch.process(audio)
         audio = audio * self.volume
+        if not self.clip:
+            # The engine turns this off when it owns the tail of the audio
+            # path: an AGC that has to work behind a limiter cannot recover
+            # anything the limiter has already flattened, so the limit has to
+            # be the last thing that happens, not the first.
+            return audio.astype(np.float32)
         # The sound card clips hard and ugly; clip gently here instead.
         return np.clip(audio, -1.0, 1.0).astype(np.float32)
 
@@ -157,31 +211,77 @@ class _FmBase(Demodulator):
             self.sample_rate, self.audio_rate, self.bandwidth_hz * self.if_headroom
         )
         self.channel = FirDecimator.lowpass(
-            self.if_factor, self.bandwidth_hz / 2.0, self.sample_rate
+            self.if_factor,
+            self.bandwidth_hz / 2.0,
+            self.sample_rate,
+            taps_per_phase=self.filter_taps,
         )
         self.discriminator = Discriminator()
-        self.deemphasis = (
+        # A passive listener on the composite baseband - the RDS receiver.
+        # It reads; it does not change what is heard.
+        self.mpx_sink: object | None = None
+        # A `dsp.stereo.StereoDecoder`, when the engine has attached one. This
+        # one is not passive: it hands back a delayed sum along with the
+        # difference, because the delay that aligns the multiplex with its own
+        # pilot has to reach both channels or they arrive skewed.
+        self.stereo: object | None = None
+        self.deemphasis = self._deemphasis()
+        # The difference channel gets its own copies of the two stages the sum
+        # goes through, built from the same numbers. Identical filters have
+        # identical group delay, which is the only reason L and R stay lined
+        # up with each other once they are added and subtracted.
+        self.side_deemphasis = self._deemphasis()
+        self.audio_stage = self._audio_stage()
+        self.side_stage = self._audio_stage()
+        # A phase step of this size means full deviation, so dividing by it
+        # puts a fully modulated signal at +/-1 regardless of the IF rate.
+        self._scale = self.if_rate / (2.0 * np.pi * self.deviation_hz)
+
+    def _deemphasis(self) -> Deemphasis | None:
+        return (
             None
             if self.deemphasis_us is None
             else Deemphasis(self.if_rate, self.deemphasis_us)
         )
-        self.audio_stage = FirDecimator.lowpass(
+
+    def _audio_stage(self) -> FirDecimator:
+        return FirDecimator.lowpass(
             self.audio_factor,
             min(self.audio_cutoff_hz, 0.45 * self.audio_rate),
             self.if_rate,
             dtype=np.float32,
         )
-        # A phase step of this size means full deviation, so dividing by it
-        # puts a fully modulated signal at +/-1 regardless of the IF rate.
-        self._scale = self.if_rate / (2.0 * np.pi * self.deviation_hz)
 
     def _demodulate(self, iq: np.ndarray) -> np.ndarray:
-        channel = self.channel.process(iq)
-        self.channel_power_dbfs = power_dbfs(channel)
+        channel = self._front(iq)
         audio = self.discriminator.process(channel) * self._scale
+        if self.mpx_sink is not None:
+            # The multiplex, tapped before de-emphasis and before the audio
+            # filter throws away everything above 15 kHz. Both are on the far
+            # side of this line and both would destroy the subcarriers the
+            # station puts up there - the stereo difference channel at 38 kHz
+            # and RDS at 57 kHz. This is the only place they exist.
+            self.mpx_sink.process(audio)
+        side = None
+        if self.stereo is not None:
+            audio, side = self.stereo.process(audio)
         if self.deemphasis is not None:
             audio = self.deemphasis.process(audio)
-        return self.audio_stage.process(audio)
+        mono = self.audio_stage.process(audio)
+        if side is None:
+            return mono
+        # Both channels were pre-emphasised at the transmitter before they
+        # were matrixed, so both need the cut - de-emphasising only the sum
+        # leaves the difference channel bright and the image wandering with
+        # frequency.
+        if self.side_deemphasis is not None:
+            side = self.side_deemphasis.process(side)
+        side = self.side_stage.process(side)
+        count = min(mono.size, side.size)
+        stereo = np.empty((count, 2), dtype=np.float32)
+        stereo[:, 0] = mono[:count] + side[:count]
+        stereo[:, 1] = mono[:count] - side[:count]
+        return stereo
 
 
 class WfmDemodulator(_FmBase):
@@ -218,7 +318,10 @@ class AmDemodulator(Demodulator):
             self.sample_rate, self.audio_rate, self.bandwidth_hz * 2.5
         )
         self.channel = FirDecimator.lowpass(
-            self.if_factor, self.bandwidth_hz / 2.0, self.sample_rate
+            self.if_factor,
+            self.bandwidth_hz / 2.0,
+            self.sample_rate,
+            taps_per_phase=self.filter_taps,
         )
         self.dc_block = DcBlock()
         self.audio_stage = FirDecimator.lowpass(
@@ -229,8 +332,7 @@ class AmDemodulator(Demodulator):
         )
 
     def _demodulate(self, iq: np.ndarray) -> np.ndarray:
-        channel = self.channel.process(iq)
-        self.channel_power_dbfs = power_dbfs(channel)
+        channel = self._front(iq)
         # The envelope carries the audio, riding on the carrier as a DC term.
         envelope = np.abs(channel).astype(np.float32)
         return self.audio_stage.process(self.dc_block.process(envelope))
@@ -259,7 +361,10 @@ class _SidebandBase(Demodulator):
         # Stage one only has to be wide enough not to clip the sideband; the
         # sharp edges come from stage two, where samples are 50x cheaper.
         self.channel = FirDecimator.lowpass(
-            self.if_factor, min(edge * 2.0, 0.45 * self.if_rate), self.sample_rate
+            self.if_factor,
+            min(edge * 2.0, 0.45 * self.if_rate),
+            self.sample_rate,
+            taps_per_phase=self.filter_taps,
         )
         low, high = (self.low_cut_hz, edge) if self.upper else (-edge, -self.low_cut_hz)
         self.sideband = FirDecimator.bandpass(
@@ -267,8 +372,7 @@ class _SidebandBase(Demodulator):
         )
 
     def _demodulate(self, iq: np.ndarray) -> np.ndarray:
-        channel = self.channel.process(iq)
-        self.channel_power_dbfs = power_dbfs(channel)
+        channel = self._front(iq)
         selected = self.sideband.process(channel)
         # Doubling restores the amplitude the discarded sideband was carrying.
         return (2.0 * np.real(selected)).astype(np.float32)
@@ -320,7 +424,10 @@ class DsbDemodulator(Demodulator):
             self.sample_rate, self.audio_rate, self.bandwidth_hz * 4.0
         )
         self.channel = FirDecimator.lowpass(
-            self.if_factor, self.bandwidth_hz / 2.0, self.sample_rate
+            self.if_factor,
+            self.bandwidth_hz / 2.0,
+            self.sample_rate,
+            taps_per_phase=self.filter_taps,
         )
         self.audio_stage = FirDecimator.lowpass(
             self.audio_factor,
@@ -330,8 +437,7 @@ class DsbDemodulator(Demodulator):
         )
 
     def _demodulate(self, iq: np.ndarray) -> np.ndarray:
-        channel = self.channel.process(iq)
-        self.channel_power_dbfs = power_dbfs(channel)
+        channel = self._front(iq)
         return self.audio_stage.process(np.real(channel).astype(np.float32))
 
 

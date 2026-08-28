@@ -17,12 +17,24 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from ..audio.output import AudioSink
+from ..audio.record import (
+    AudioRecorder,
+    IqRecorder,
+    RecordingLimits,
+    timestamped_name,
+)
+from ..decode.rds import MIN_IF_RATE_HZ, RdsReceiver, RdsState
 from ..dsp import convert, demod
-from ..dsp.psd import DEFAULT_FFT_SIZE, Spectrum
+from ..dsp.chain import AudioChain, FrontEnd
+from ..dsp.denoise import SpectralNoiseReduction
+from ..dsp.filters import DEFAULT_TAPS_PER_PHASE, Deemphasis
+from ..dsp.psd import DEFAULT_FFT_SIZE, WINDOWS, Spectrum
+from ..dsp.stereo import MIN_MPX_RATE_HZ, StereoDecoder
 from ..scan.classifier import Signal
 from ..scan.detector import DEFAULT_THRESHOLD_DB
 from ..scan.sweeper import (
@@ -91,6 +103,20 @@ class DisplayFrame:
     audio_latency_s: float
     underruns: int
     ring_overruns: int
+    # How much the AGC is currently adding. Worth showing rather than hiding:
+    # an AGC winding 40 dB of gain into a channel is the explanation for why
+    # the noise got louder when the signal went away.
+    agc_gain_db: float = 0.0
+    # What the station says about itself, where it says anything. None
+    # means nothing is listening for it - a mode other than broadcast FM,
+    # or the feature switched off - which is a different thing from a
+    # station that carries no RDS, and the view says so differently.
+    rds: RdsState | None = None
+    # Whether what just went to the sound card was two different channels.
+    # Reported from the audio rather than from the pilot on purpose: audio
+    # noise reduction mixes down, so a pilot-only flag would light the
+    # indicator while both ears heard the same thing.
+    stereo: bool = False
 
     def frequencies(self) -> np.ndarray:
         """Absolute frequency of each bin, low to high."""
@@ -114,6 +140,50 @@ class ScanUpdate:
     @property
     def complete(self) -> bool:
         return self.result is not None
+
+
+@dataclass(frozen=True)
+class RecordingStatus:
+    """What the recorders are doing, for a status line that tells the truth."""
+
+    audio_seconds: float = 0.0
+    audio_path: str | None = None
+    iq_seconds: float = 0.0
+    iq_path: str | None = None
+    message: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.audio_path is not None or self.iq_path is not None
+
+
+class _Capture:
+    """A one-shot request for raw IQ, filled by the DSP thread.
+
+    The calibration assistant needs a block of samples that nothing has
+    touched, and the DSP thread is the only place they exist. Rather than give
+    another thread a way in, the request is left here and collected on the way
+    past.
+    """
+
+    def __init__(self, samples: int) -> None:
+        self.wanted = int(samples)
+        self.blocks: list[np.ndarray] = []
+        self.done = threading.Event()
+        self.collected = 0
+
+    def feed(self, iq: np.ndarray) -> None:
+        take = min(iq.size, self.wanted - self.collected)
+        if take > 0:
+            self.blocks.append(iq[:take].copy())
+            self.collected += take
+        if self.collected >= self.wanted:
+            self.done.set()
+
+    def result(self) -> np.ndarray:
+        if not self.blocks:
+            return np.zeros(0, dtype=np.complex64)
+        return np.concatenate(self.blocks)
 
 
 class _ReaderSource:
@@ -175,11 +245,50 @@ class Engine:
         self.mode = "wfm"
         self.volume = 0.5
         self.squelch_dbfs: float | None = None
+        self.ppm = 0
+        # "auto" means whatever the mode says, which is 75 microseconds for
+        # broadcast FM and nothing for the rest. Only an Expert user has a
+        # reason to override it, and only one of them - 50 microseconds
+        # outside the Americas - is ever the right answer.
+        self.deemphasis_us: float | str | None = "auto"
+        self.if_noise_reduction = False
+        self.if_reduction_db = 12.0
+        # Taps per polyphase branch in the channel filter - SDR#'s "filter
+        # order". The default is right for 8-bit data; raising it is for
+        # pushing a strong neighbour off a weak channel.
+        self.filter_taps = DEFAULT_TAPS_PER_PHASE
+        # Costs 2.4% of a core and only runs on broadcast FM, so it is on
+        # by default: a station's own name is the single most useful thing
+        # this app can put on the screen.
+        self.rds_enabled = True
+        self._rds: RdsReceiver | None = None
+        # Broadcast FM has been stereo since 1961 and the difference channel
+        # is right there in the multiplex, so this is on by default too. It
+        # costs nothing on any other mode, where no decoder is attached.
+        self.stereo_enabled = True
+        self._stereo: StereoDecoder | None = None
+        self._stereo_out = False
+
+        # The two optional chains either side of the demodulator. Both are a
+        # no-op until something is switched on; see `dsp/chain.py`.
+        self.front = FrontEnd(float(sample_rate))
+        self.audio = AudioChain(float(demod.AUDIO_RATE))
+        self.audio.volume = self.volume
+
+        self.recording_dir = Path.home() / "BetterSDR Recordings"
+        self.recording_limits = RecordingLimits()
+        self._audio_recorder: AudioRecorder | None = None
+        self._iq_recorder: IqRecorder | None = None
+        self._recording_message: str | None = None
+        self._capture: _Capture | None = None
 
         self._block_bytes = dsp_block_bytes_for(sample_rate)
         self._carry = np.empty(0, dtype=np.complex64)
         self._spectrum = Spectrum(fft_size=fft_size, sample_rate=float(sample_rate))
-        self._demod = demod.create(self.mode, float(sample_rate), volume=self.volume)
+        self._demod = demod.create(self.mode, float(sample_rate), volume=1.0)
+        self._demod.clip = False
+        self._apply_rds()
+        self._apply_stereo()
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
         self._scan_mailbox: Mailbox[ScanUpdate] = Mailbox()
         self._commands: queue.Queue[Callable[[], None]] = queue.Queue()
@@ -213,7 +322,11 @@ class Engine:
 
         self.device = Device()
         self.device.open()
-        self.device.configure(center_freq=self.center_hz, sample_rate=self.sample_rate)
+        self.device.configure(
+            center_freq=self.device_center_hz,
+            sample_rate=self.sample_rate,
+            ppm=self.ppm,
+        )
         # Before the reader starts, so the probe reads have the device to
         # themselves - afterwards only the reader thread may touch it.
         self.gain = choose_gain(self.device)
@@ -231,6 +344,11 @@ class Engine:
         return self
 
     def stop(self) -> None:
+        # Before the thread is joined, so a recording in progress is closed
+        # with a valid WAV header rather than left for the operating system to
+        # tidy up. A truncated header makes the file unplayable, which would
+        # lose the whole recording rather than its last block.
+        self._end_recording(audio=True, iq=True)
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
@@ -267,7 +385,23 @@ class Engine:
         # can see it. See `frontend.safe_center_hz`.
         self.center_hz = safe_center_hz(center_hz)
         if self.reader is not None:
-            self.reader.tune(self.center_hz)
+            self.reader.tune(self.device_center_hz)
+        # A new frequency is a new station, and the old one's name lingering
+        # on screen over somebody else's signal is worse than a blank.
+        self._commands.put(self._reset_rds)
+        self._commands.put(self._reset_stereo)
+
+    @property
+    def device_center_hz(self) -> int:
+        """Where the *tuner* is parked, which is not always what is displayed.
+
+        With offset tuning on they differ: the hardware sits to one side and
+        the front-end chain mixes the wanted signal back to the middle, so the
+        DC spike lands somewhere harmless instead of on top of the carrier
+        being listened to. Everything user-facing still talks about
+        `center_hz`; only the reader is told the other number.
+        """
+        return safe_center_hz(self.center_hz + self.front.offset_hz)
 
     def auto_gain(self) -> None:
         """Re-pick the RF gain for whatever the radio is pointed at now.
@@ -308,9 +442,37 @@ class Engine:
 
     def set_volume(self, volume: float) -> None:
         # A bare float assignment, so it takes effect on the next block with no
-        # need to round-trip through the command queue.
+        # need to round-trip through the command queue. Applied at the end of
+        # the audio chain rather than inside the demodulator, so an AGC in
+        # front of it cannot spend its range undoing the setting.
         self.volume = float(volume)
-        self._demod.volume = self.volume
+        self.audio.volume = self.volume
+
+    def set_mute(self, muted: bool) -> None:
+        self.audio.mute = bool(muted)
+
+    def set_audio_device(self, device: int | str | None) -> None:
+        """Play through a different sound card.
+
+        The stream has to be torn down and rebuilt, so this runs on the DSP
+        thread - the only one that writes to the sink. A device that will not
+        open leaves the old one running rather than leaving the app silent
+        with no way back.
+        """
+        self.audio_device = device
+        self._commands.put(lambda: self._swap_sink(device))
+
+    def _swap_sink(self, device: int | str | None) -> None:
+        previous = self.sink
+        if previous is not None:
+            previous.stop()
+        try:
+            self.sink = AudioSink(rate=demod.AUDIO_RATE, device=device).start()
+        except Exception as exc:  # noqa: BLE001 - a bad device is not fatal
+            self.last_error = f"That audio device could not be opened: {exc}"
+            self.sink = previous
+            if previous is not None:
+                previous.start()
 
     def set_mode(self, mode: str, bandwidth_hz: float | None = None) -> None:
         """Swap the demodulator. Runs on the DSP thread, which owns it."""
@@ -345,6 +507,154 @@ class Engine:
     def set_squelch(self, threshold_dbfs: float | None) -> None:
         self.squelch_dbfs = threshold_dbfs
         self._commands.put(lambda: self._rebuild(self.mode, None))
+
+    # -- front end, display and hardware -----------------------------------
+
+    def set_stereo(self, enabled: bool) -> None:
+        """Decode the 38 kHz difference channel on broadcast FM."""
+        self.stereo_enabled = bool(enabled)
+        self._commands.put(self._apply_stereo)
+
+    def set_rds(self, enabled: bool) -> None:
+        """Read the data a broadcast FM station sends alongside its audio."""
+        self.rds_enabled = bool(enabled)
+        self._commands.put(self._apply_rds)
+
+    def set_deemphasis(self, tau_us: float | str | None) -> None:
+        """`"auto"`, `None` for off, or 50 / 75 microseconds."""
+        self.deemphasis_us = tau_us
+        self._commands.put(self._apply_deemphasis)
+
+    def set_if_noise_reduction(
+        self, enabled: bool, reduction_db: float | None = None
+    ) -> None:
+        self.if_noise_reduction = bool(enabled)
+        if reduction_db is not None:
+            self.if_reduction_db = float(reduction_db)
+        self._commands.put(self._apply_if_noise_reduction)
+
+    def set_filter_taps(self, taps_per_phase: int) -> None:
+        """How sharp the channel filter's skirt is, in taps per branch."""
+        self.filter_taps = max(4, int(taps_per_phase))
+        self._commands.put(lambda: self._rebuild(self.mode, self._demod.bandwidth_hz))
+
+    def set_offset_tuning(self, offset_hz: float) -> None:
+        """Park the tuner to one side and mix the signal back in software.
+
+        Both halves have to move together, so this is not just a chain
+        setting: the shift is only correct if the hardware actually went where
+        the chain thinks it did.
+        """
+        self.front.set_offset_hz(offset_hz)
+        if self.reader is not None:
+            self.reader.tune(self.device_center_hz)
+
+    def set_display(
+        self,
+        fft_size: int | None = None,
+        window: str | None = None,
+        smoothing: float | None = None,
+    ) -> None:
+        """Change how the spectrum is measured.
+
+        Not merely a display preference: the scanner shares `dsp/psd.py` and
+        inherits the FFT size, so these settings change what a detection
+        threshold is measured against as well as what the picture looks like.
+        The levels stay calibrated dBFS through all of it, which is what makes
+        that safe.
+        """
+        if window is not None and window not in WINDOWS:
+            raise ValueError(f"unknown window {window!r}; expected one of {WINDOWS}")
+        self._commands.put(lambda: self._apply_display(fft_size, window, smoothing))
+
+    @property
+    def fft_size(self) -> int:
+        return self._spectrum.fft_size
+
+    def set_ppm(self, ppm: int) -> None:
+        """Correct for the dongle's crystal being a few parts per million out."""
+        self.ppm = int(ppm)
+        if self.reader is None:
+            return
+
+        def command(device: Device) -> None:
+            device.freq_correction_ppm = self.ppm
+            # The correction is applied when a frequency is programmed, so the
+            # tuner keeps the old one until it is told to move. Without this
+            # the calibration appears to do nothing until the next retune.
+            device.center_freq = self.device_center_hz
+
+        self.reader.submit(command)
+
+    def set_bias_tee(self, enabled: bool) -> None:
+        """Switch the antenna port's 4.5 V supply.
+
+        Never called without the user having agreed to it in words: it feeds
+        DC into whatever is plugged in, and equipment that was not expecting
+        it can be damaged. `Device.set_bias_tee` says the same thing; this
+        repeats it because the engine is where the GUI reaches it.
+        """
+        if self.reader is not None:
+            self.reader.submit(lambda device: device.set_bias_tee(bool(enabled)))
+
+    def set_tuner_agc(self, enabled: bool) -> None:
+        """Hand gain control to the tuner, or take it back.
+
+        Turning it on abandons the gain `choose_gain` measured. That is a
+        legitimate Expert choice on a quiet band and a poor one on the FM
+        band, where the front end overloads.
+        """
+        if self.reader is None:
+            return
+        if enabled:
+            self.reader.set_gain(None)
+        elif self.gain is not None:
+            self.reader.set_gain(self.gain.gain_db)
+
+    def set_digital_agc(self, enabled: bool) -> None:
+        """The RTL2832U's own digital AGC, which is not the tuner's."""
+        if self.reader is not None:
+            self.reader.submit(lambda device: device.set_agc(bool(enabled)))
+
+    # -- recording ---------------------------------------------------------
+
+    @property
+    def recording(self) -> RecordingStatus:
+        audio, iq = self._audio_recorder, self._iq_recorder
+        return RecordingStatus(
+            audio_seconds=audio.seconds if audio is not None else 0.0,
+            audio_path=str(audio.path) if audio is not None else None,
+            iq_seconds=iq.seconds if iq is not None else 0.0,
+            iq_path=str(iq.path) if iq is not None else None,
+            message=self._recording_message,
+        )
+
+    def start_recording(self, audio: bool = False, iq: bool = False) -> None:
+        """Open a recording. Runs on the DSP thread, which owns the files."""
+        self._commands.put(lambda: self._begin_recording(audio, iq))
+
+    def stop_recording(self, audio: bool = True, iq: bool = True) -> None:
+        self._commands.put(lambda: self._end_recording(audio, iq))
+
+    # -- calibration -------------------------------------------------------
+
+    def capture(self, seconds: float = 0.5, timeout: float = 5.0) -> np.ndarray | None:
+        """Collect raw IQ off the DSP thread, for the calibration assistant.
+
+        Blocks the caller. That is acceptable for an explicit "measure this"
+        button and would not be for anything on the display path, which is why
+        this is the only synchronous route into the sample stream.
+        """
+        if not self.running or self.scanning:
+            return None
+        request = _Capture(int(self.sample_rate * max(0.05, seconds)))
+        self._capture = request
+        try:
+            if not request.done.wait(timeout):
+                return None
+        finally:
+            self._capture = None
+        return request.result()
 
     # -- scanning ----------------------------------------------------------
 
@@ -381,12 +691,20 @@ class Engine:
         """
         if self.reader is None or self.scanning:
             return
+        # The window belongs to the band being swept, not to whatever the
+        # receiver happens to be listening through. This used to fall back to
+        # `self.sample_rate`, and listening to an AM station leaves that at
+        # 240 kHz: a sweep of FM broadcast started afterwards planned 141
+        # steps instead of 12, through a window narrower than one FM station,
+        # so every width and shape it measured was wrong as well as slow.
+        # A band that wants something narrower says so in `sample_rate_hz`.
+        #
         # The bottom of the range is where the window is most likely to reach
         # below 0 Hz, so that is what the guard is asked about. Sweeping the
         # AM band at 2.4 MHz would otherwise report the upconverter's own
         # oscillator as the strongest station in Seattle.
         rate = safe_sample_rate(
-            low_hz, preferred_hz=int(sample_rate_hz or self.sample_rate)
+            low_hz, preferred_hz=int(sample_rate_hz or DEFAULT_SAMPLE_RATE)
         )
         sweeper = Sweeper(
             low_hz,
@@ -423,9 +741,54 @@ class Engine:
             # underrun count is how the audio path reports a real fault, and
             # filling it with expected ones would make it useless.
             self.sink.stop()
+        self._probe_scan_gain(sweeper)
+
+    def _probe_scan_gain(self, sweeper: Sweeper) -> None:
+        """Measure the gain for the band about to be swept.
+
+        Gain belongs to the band, and a sweep points the front end somewhere
+        entirely different from wherever it was listening. Arriving from an AM
+        station the tuner sits near 34 dB, which is over 20 dB more than the
+        FM band takes without pinning the 8-bit ADC at the rails - and a
+        clipped front end manufactures spurs right across the sweep, which the
+        detector then dutifully reports as stations. The other direction is
+        just as wrong and quieter about it: sweeping the AM band on the FM
+        band's 8-12 dB leaves 25 dB of signal on the table, so the weak half
+        of the list never crosses the threshold.
+
+        Measured at the *first step's* frequency rather than where the radio
+        was, which is the whole point, and deliberately not through
+        `auto_gain`: that probes wherever the tuner happens to be parked, and
+        it de-duplicates against `_gain_pending`, which would let a probe
+        queued moments before the scan stand in for this one.
+
+        No sink parking here - the audio is already stopped for the length of
+        the sweep - and no `_gain_pending` either, so the measurement
+        `_end_scan` takes on the way back is not suppressed by this one.
+        """
+        reader = self.reader
+        if reader is None:
+            return
+        first = safe_center_hz(sweeper.current_hz)
+
+        def command(device: Device) -> None:
+            try:
+                device.center_freq = first
+                device.reset_buffer()
+                self.gain = choose_gain(device)
+            except Exception as exc:  # noqa: BLE001 - never abandon the sweep
+                # A refused command is a diagnosable condition, not a reason
+                # to stop: the sweep still measures, just at the old gain.
+                self.last_error = f"Could not measure the gain to scan with: {exc}"
+
+        reader.submit(command)
 
     def _end_scan(self) -> None:
         sweeper, self._sweeper = self._sweeper, None
+        # `stop_scan` queues this unconditionally and a sweep that ends on its
+        # own has already run it, so a second pass through here must not
+        # repeat the work - a gain probe in particular is 340 ms of dead air.
+        swept = sweeper is not None
         self._scan_source = None
         self._scan_wanted.clear()
         if sweeper is not None:
@@ -448,6 +811,13 @@ class Engine:
         if self._resume_hz is not None:
             self.tune(self._resume_hz)
             self._resume_hz = None
+        if swept:
+            # After the retune, so the probe measures at the frequency being
+            # returned to. `_probe_scan_gain` set the front end up for the
+            # band that was swept, which is not the band being listened to
+            # unless the user scanned the one they were already on; leaving it
+            # would hand back a station 25 dB down, or a clipped one.
+            self.auto_gain()
         if self.sink is not None:
             self.sink.start()
 
@@ -519,20 +889,180 @@ class Engine:
         # at the new one.
         self._carry = np.empty(0, dtype=np.complex64)
         self._spectrum = Spectrum(
-            fft_size=self._spectrum.fft_size, sample_rate=float(rate)
+            fft_size=self._spectrum.fft_size,
+            sample_rate=float(rate),
+            window=self._spectrum.window_name,
+            smoothing=self._spectrum.smoothing,
         )
+        # Every filter in the front-end chain was designed around the old
+        # rate, and a DC tracker with a quarter-second time constant at
+        # 2.4 MS/s is a two-and-a-half second one at 240 kS/s.
+        self.front.set_sample_rate(float(rate))
         self._rebuild(self.mode, self._demod.bandwidth_hz)
         if self.sink is not None:
             self.sink.start()
+
+    def _apply_display(
+        self, fft_size: int | None, window: str | None, smoothing: float | None
+    ) -> None:
+        current = self._spectrum
+        self._spectrum = Spectrum(
+            fft_size=current.fft_size if fft_size is None else int(fft_size),
+            sample_rate=float(self.sample_rate),
+            window=current.window_name if window is None else window,
+            smoothing=current.smoothing if smoothing is None else float(smoothing),
+        )
+        # Samples gathered for the old transform are the wrong length for the
+        # new one, and half a frame of them would put a seam in the first row.
+        self._carry = np.empty(0, dtype=np.complex64)
+
+    def _apply_deemphasis(self) -> None:
+        """Override the mode's own de-emphasis, if the user asked for one.
+
+        Set on the instance rather than plumbed through `demod.create`,
+        because only the FM modes have the stage at all and the factory takes
+        one keyword set for every mode.
+        """
+        if self.deemphasis_us == "auto" or not hasattr(self._demod, "deemphasis"):
+            return
+        self._demod.deemphasis = (
+            None
+            if self.deemphasis_us is None
+            else Deemphasis(self._demod.if_rate, float(self.deemphasis_us))
+        )
+
+    def _apply_if_noise_reduction(self) -> None:
+        self._demod.if_stage = (
+            SpectralNoiseReduction(
+                self._demod.if_rate,
+                complex_input=True,
+                reduction_db=self.if_reduction_db,
+            )
+            if self.if_noise_reduction
+            else None
+        )
+
+    def _apply_rds(self) -> None:
+        """Attach or detach the RDS receiver, on the DSP thread.
+
+        Three things have to be true at once, and all of them can change under
+        the user: broadcast FM, the feature on, and an IF wide enough to still
+        contain a subcarrier 57 kHz off centre. Narrowing the channel filter
+        past about 120 kHz removes RDS from the signal itself - so the
+        receiver goes away rather than sitting there decoding nothing.
+        """
+        wanted = (
+            self.rds_enabled
+            and hasattr(self._demod, "mpx_sink")
+            and self._demod.if_rate >= MIN_IF_RATE_HZ
+            and self._demod.bandwidth_hz >= 2.0 * 60_000.0
+        )
+        if not wanted:
+            self._rds = None
+        elif self._rds is None or self._rds.if_rate != self._demod.if_rate:
+            self._rds = RdsReceiver(self._demod.if_rate)
+        if hasattr(self._demod, "mpx_sink"):
+            self._demod.mpx_sink = self._rds
+
+    def _reset_rds(self) -> None:
+        if self._rds is not None:
+            self._rds.reset()
+
+    def _apply_stereo(self) -> None:
+        """Attach or detach the stereo decoder, on the DSP thread.
+
+        The same three conditions as RDS, for the same reasons, with one
+        number changed: the difference channel sits at 23-53 kHz rather than
+        at 57, so it survives a slightly narrower IF. Narrowing the channel
+        filter past about 106 kHz removes it from the signal, at which point
+        the honest thing is to stop claiming the station is in stereo.
+        """
+        wanted = (
+            self.stereo_enabled
+            and hasattr(self._demod, "stereo")
+            and self._demod.if_rate >= MIN_MPX_RATE_HZ
+            and self._demod.bandwidth_hz >= 2.0 * 53_000.0
+        )
+        if not wanted:
+            self._stereo = None
+        elif self._stereo is None or self._stereo.sample_rate != self._demod.if_rate:
+            self._stereo = StereoDecoder(self._demod.if_rate)
+        if hasattr(self._demod, "stereo"):
+            self._demod.stereo = self._stereo
+
+    def _reset_stereo(self) -> None:
+        if self._stereo is not None:
+            self._stereo.reset()
 
     def _rebuild(self, mode: str, bandwidth_hz: float | None) -> None:
         self._demod = demod.create(
             mode,
             float(self.sample_rate),
             bandwidth_hz=bandwidth_hz,
-            volume=self.volume,
+            # Unity, with the limiter off: volume and the final clip belong to
+            # `AudioChain`, at the end of the path, so the AGC in front of
+            # them has the full range to work with.
+            volume=1.0,
             squelch_dbfs=self.squelch_dbfs,
+            filter_taps=self.filter_taps,
         )
+        self._demod.clip = False
+        self._apply_deemphasis()
+        self._apply_if_noise_reduction()
+        self._apply_rds()
+        self._apply_stereo()
+
+    # -- recording, on the DSP thread --------------------------------------
+
+    def _begin_recording(self, audio: bool, iq: bool) -> None:
+        self._recording_message = None
+        if audio and self._audio_recorder is None:
+            name = timestamped_name(self.center_hz, "AF")
+            # The header is written once, so the channel count is decided
+            # here from what is being heard right now. A station that drops
+            # its pilot mid-recording keeps the file it started.
+            recorder = AudioRecorder(
+                self.recording_dir / name,
+                demod.AUDIO_RATE,
+                self.recording_limits,
+                channels=2 if self._stereo_out else 1,
+            ).start()
+            self._audio_recorder = recorder if recorder.active else None
+            self._recording_message = recorder.stopped_reason
+        if iq and self._iq_recorder is None:
+            name = timestamped_name(self.center_hz, "IQ")
+            recorder = IqRecorder(
+                self.recording_dir / name, self.sample_rate, self.recording_limits
+            ).start()
+            self._iq_recorder = recorder if recorder.active else None
+            self._recording_message = recorder.stopped_reason or self._recording_message
+
+    def _end_recording(self, audio: bool, iq: bool) -> None:
+        if audio and self._audio_recorder is not None:
+            self._audio_recorder.stop()
+            self._audio_recorder = None
+        if iq and self._iq_recorder is not None:
+            self._iq_recorder.stop()
+            self._iq_recorder = None
+
+    def _service_recorders(self, raw: np.ndarray, audio: np.ndarray) -> None:
+        """Feed both recorders, and notice when either has stopped itself.
+
+        A recorder that hit its size limit or ran the disk low closes its own
+        file. Dropping the reference here is what turns that into something
+        the status line can report, rather than a recording that silently
+        stopped growing.
+        """
+        if self._iq_recorder is not None:
+            self._iq_recorder.write(raw)
+            if not self._iq_recorder.active:
+                self._recording_message = self._iq_recorder.stopped_reason
+                self._iq_recorder = None
+        if self._audio_recorder is not None and audio.size:
+            self._audio_recorder.write(audio)
+            if not self._audio_recorder.active:
+                self._recording_message = self._audio_recorder.stopped_reason
+                self._audio_recorder = None
 
     def _drain_commands(self) -> None:
         while True:
@@ -543,14 +1073,21 @@ class Engine:
             command()
 
     def _run(self) -> None:
-        reader, sink = self.reader, self.sink
-        if reader is None or sink is None:
+        reader = self.reader
+        if reader is None or self.sink is None:
             return
         interval = 1.0 / SPECTRUM_HZ
         last_frame = 0.0
 
         while not self._stop.is_set():
             self._drain_commands()
+            # Re-read rather than bound once at the top of the thread:
+            # choosing a different sound card replaces the sink object, and a
+            # loop holding the old one would keep writing into a stream that
+            # is no longer playing anywhere.
+            sink = self.sink
+            if sink is None:
+                break
             if self._sweeper is not None:
                 self._scan_step()
                 continue
@@ -578,8 +1115,20 @@ class Engine:
                     break
                 continue
 
-            iq = convert.to_complex(raw)
-            sink.write(self._demod.process(iq))
+            # IQ recording is taken here, from the raw bytes, ahead of every
+            # correction and every demodulator. That is deliberate: a capture
+            # is meant to be replayable through software that does not exist
+            # yet, and one written from further down the path would carry this
+            # session's noise blanker and IQ correction baked in.
+            iq = self.front.process(convert.to_complex(raw))
+            audio = self.audio.process(self._demod.process(iq))
+            self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
+            sink.write(audio)
+            self._service_recorders(raw, audio)
+
+            capture = self._capture
+            if capture is not None:
+                capture.feed(iq)
 
             # The display FFT needs a whole frame's worth of samples. A block
             # is eight frames at 2.4 MS/s but less than one at the 240 kS/s
@@ -614,8 +1163,11 @@ class Engine:
                     audio_latency_s=sink.latency_s,
                     underruns=sink.underruns,
                     ring_overruns=reader.ring.overruns,
+                    agc_gain_db=self.audio.agc.gain_db if self.audio.agc_enabled else 0.0,
+                    rds=None if self._rds is None else self._rds.snapshot(),
+                    stereo=self._stereo_out,
                 )
             )
 
 
-__all__ = ["DisplayFrame", "Engine", "Mailbox", "ScanUpdate"]
+__all__ = ["DisplayFrame", "Engine", "Mailbox", "RecordingStatus", "ScanUpdate"]
