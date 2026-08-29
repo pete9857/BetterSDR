@@ -21,7 +21,7 @@ Full roadmap and phase breakdown: **[docs/PLAN.md](docs/PLAN.md)**.
 | **1 — Listen** (demod, audio, spectrum/waterfall) | **Complete and verified on hardware** |
 | **2 — Discovery** (sweep, detect, classify) | **Complete and verified on hardware** |
 | **3 — SDR# parity** | **Complete and verified on hardware** (small gaps and untested paths listed in docs/PLAN.md) |
-| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS and FM stereo complete and verified on hardware**; the rest not started |
+| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo and ADS-B complete and verified on hardware** (ADS-B: engine, aircraft screen and a real sky, 2026-08-28); HD Radio and POCSAG not started |
 | **5 — Packaging** | Not started |
 
 ### Driver state on this machine
@@ -538,6 +538,116 @@ don't re-derive them. Full reasoning in **Amendment 8** of docs/PLAN.md.
 - **The whole decoder costs 2.0% of a core** (20 ms per second of radio at
   2.4 MS/s, against the demodulator's 63 ms), and is on by default.
 
+## ADS-B facts
+
+Measured on this machine on 2026-08-28, against synthetic Mode S bursts. Same
+rule as the other fact sections: don't re-derive them. The decoder ships but
+has **not yet been run against real aircraft** - see the note at the end.
+
+- **A Mode S pulse is 1.2 samples long at 2.4 MS/s, and that one number
+  decides the whole design.** A pulse can contain exactly one sample, so
+  reading single samples reads a triangle that interpolation invented: at some
+  arrival phases the read for a bit's first half lands on the skirt of a pulse
+  belonging to its second, and the bit comes out inverted. Every read is
+  therefore the *energy* in a half-microsecond window, taken as the difference
+  of a running sum at two fractional positions - which also makes a whole
+  112-bit message two strided slices off one `np.interp`.
+- **A running sum is biased half a sample late, and half a sample is
+  0.21 us - most of a pulse.** `total[i]` is the sum of everything *before*
+  sample i, while a sample stands for the interval around its own instant.
+  Left uncorrected the bias moved a pulse's whole energy into the wrong half
+  of its bit; correcting it is one `+ 0.5` and it is not optional.
+- **Alignment cannot be solved by a finer grid; it is solved by the
+  checkword.** The preamble search places a burst to within a quarter of a
+  microsecond, and at 2.4 MS/s that is not close enough to be sure which half
+  of a bit a pulse's single sample belongs to. The marginal arrival phases are
+  **a quarter of all of them**, not a rare corner - a fixed test at one phase
+  passes and the decoder still fails on air. Slicing at nine sub-step offsets
+  and accepting the first that passes CRC took a sweep of 282 arrival phases
+  from **139/282 to 282/282**. A wrong offset passes at one in sixteen
+  million, so this costs nothing in confidence.
+- **`np.interp` beats indexing the running sum directly, by three times.**
+  The obvious guess is the other way round - the sample grid is 0, 1, 2, ...
+  so a binary search per query looks like waste - but the hand-written gather
+  measured 30 ms per second of radio against `np.interp`'s 8.9. Caching the
+  two index arrays across blocks matters as much as the interpolation itself.
+- **The candidate search is two stages because the second is the expensive
+  one.** A threshold against the block's own noise floor leaves a fraction of
+  a percent of the steps in a quiet band; the pulse-and-gap pattern then runs
+  on those by fancy indexing. A dozen full-length array passes instead was the
+  difference between 5% of a core and 20%.
+- **Cost: 56 ms per second of radio on a quiet band, 67 ms with 120 messages
+  a second in it** - 5.6% of a core at 2.4 MS/s, against the WFM
+  demodulator's 63 ms. Decoded 119 of 120 synthetic messages with zero bad
+  frames.
+- **A mismatched CPR pair can resolve to a place off the globe.** The zone
+  arithmetic runs from -90 to 270, so two frames that do not belong together
+  produced latitudes of 106 and 233 degrees. Those are rejected. A mismatched
+  pair can equally resolve to a perfectly ordinary *wrong* place, which
+  nothing in the arithmetic can catch - the ten-second pairing window is the
+  real defence, and it is there because a jet moves 4 km between frames.
+- **An airborne frame and a surface frame are not a pair, and this is the
+  version of the above that actually happened.** A surface frame divides the
+  globe into 90 degrees of latitude where an airborne one uses 360, so
+  pairing one of each applies the wrong span to half the arithmetic - and
+  aircraft on approach send both within seconds. Found off air on 2026-08-28
+  on the first real sky: an aircraft near Boeing Field displayed at **57
+  degrees east with its latitude still correct**, which is exactly the
+  ordinary-looking wrong answer nothing downstream can catch. Each stored
+  half now carries the kind of frame it came from and only matching halves
+  pair; `_cpr_local` covers the gap while a landing aircraft's two halves
+  disagree.
+- **Altitude above 50,000 ft is not decoded.** The Q bit selects Gillham
+  coding there, and returning nothing is better than returning a number with
+  no way to check it against real air. Same rule as the classifier's "Unknown
+  signal".
+- **Velocity subtypes 3 and 4 are left alone.** They report airspeed and
+  heading, not velocity over the ground, and writing one into a field labelled
+  "ground speed" would be a quiet lie.
+- **Heard off air on 2026-08-28, indoors, on the stock aerial**, which was the
+  first time any of the above met a real sky. Six aircraft in 70 seconds at
+  **~800 messages a minute**, 248 positions, with callsigns, altitudes, speeds
+  and tracks all plausible for the Seattle approach - and **0 audio underruns
+  and 0 ring overruns** across the whole excursion and back.
+- **Bad frames outnumber good ones about two to one** (2,013 against 913 in
+  that session) and that is the design working, not messages being lost. The
+  candidate gate deliberately passes anything shaped vaguely like a preamble
+  and lets the checkword do the rejecting; the count is noise being tried, not
+  aircraft being missed. It is shown only at Expert for that reason.
+- **Messages arrive between -3 and -24 dBFS**, which is what the four strength
+  bars are spread across. A scale topping out at -20 showed four bars for
+  every aircraft in view and said nothing about which was overhead.
+- **1090 MHz asks for 49.6 dB of gain against the FM band's 20-33 dB.** Nearly
+  30 dB apart, on the same aerial, minutes apart - the clearest measurement yet
+  of why gain belongs to the band rather than to the session.
+
+Wiring it into the app produced three findings of its own, all of the same
+shape: aircraft tracking is the first feature that *borrows* the radio.
+
+- **`center_hz` means the frequency the user is listening to, and an excursion
+  must not move it.** Every view reads it to configure itself. Tuning it to
+  1090 MHz meant that leaving the aircraft screen took the listening screen
+  through the band plan's aircraft entry, which handed an FM station `raw`
+  mode and the 49.6 dB the quiet band had asked for: 50 dB into overload, no
+  RDS, no stereo. A sweep borrows the tuner without touching `center_hz`;
+  `_begin_adsb` now does the same, and the display frame carries the borrowed
+  frequency so the spectrum still says where the samples came from.
+- **A view that arrives configures itself from the radio, so the page leaving
+  must be stopped before the page arriving is started.** `_show_page` used to
+  start the incoming page first, which is the other half of the bug above.
+- **The gain probe on the way back cannot go through `auto_gain`.** It
+  de-duplicates against `_gain_pending`, and the listening screen asks for a
+  probe the instant it is shown - which during an aircraft session is a
+  measurement of 1090 MHz standing in for the one that matters.
+  `_probe_gain_directly` submits behind the retune so it is the last word,
+  which is exactly why `_probe_scan_gain` exists too.
+- **Probes in flight must be counted, not flagged.** Two overlap on the way
+  back - the arriving screen's and the excursion's own - and a boolean cleared
+  by the first unparked the audio while the second was still running, at
+  **5-12 underruns** on that path against 0 with no view starting up beside
+  it. `Engine.probing` is the count; parking asks it, de-duplication still
+  asks `_gain_pending`, and the two questions are not the same one.
+
 ## Architecture
 
 ```
@@ -577,16 +687,19 @@ bettersdr/
   decode/
     rds.py        the 57 kHz subcarrier: BPSK, block sync, station name,
                   radio text, PI code and the US callsign it encodes
-                  (adsb, pocsag still to come)
+    adsb.py       1090 MHz Mode S: preamble, PPM slicing, CRC-24, CPR
+                  positions and the aircraft list (pocsag still to come)
   audio/
     output.py     jitter buffer + clock drift sync
     record.py     audio WAV and byte-exact baseband IQ WAV, with limits
   ui/
-    app shell     main_window.py, levels.py, listen_view.py, discover_view.py
+    app shell     main_window.py, levels.py, listen_view.py, discover_view.py,
+                  aircraft_view.py
     freq_manager.py  the bookmark window
     widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
-                  colormaps.py, axes.py, signalcard.py, icons.py,
-                  panel.py (the sectioned, level-gated control column)
+                  colormaps.py, axes.py, signalcard.py, aircraftcard.py,
+                  icons.py, panel.py (the sectioned, level-gated control
+                  column)
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
 tests/
   synth.py        synthetic IQ generator — most tests need no hardware
@@ -653,6 +766,13 @@ Device control calls are serialised through a command queue consumed by the read
   is 340 ms of it. Park the audio sink around such work rather than let the
   underrun count absorb it, and size the work in time so it does not grow
   tenfold when the window narrows.
+- **A feature that borrows the radio gives back everything it took, and
+  changes nothing the user can see while it holds it.** A sweep and the
+  aircraft screen both park the tuner somewhere else; neither may move
+  `center_hz`, `mode` or the audio path, because a view arriving mid-excursion
+  reads exactly those to set itself up. What was borrowed is restored in the
+  order it was taken - window, then frequency, then a fresh gain measurement
+  at the frequency being returned to.
 - **The window width is a correctness setting, not a display preference.**
   `frontend.safe_sample_rate` guards every path that picks a frequency, and it
   only ever narrows - so a deliberate choice survives unless it would put the

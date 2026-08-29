@@ -26,6 +26,7 @@ from bettersdr.core.engine import (
     dsp_block_bytes_for,
 )
 from bettersdr.dsp.psd import DEFAULT_FFT_SIZE
+from tests import synth_adsb as gen
 
 
 def frame(bins: int = 8, center_hz: float = 100e6, rate: float = 2.4e6) -> DisplayFrame:
@@ -648,3 +649,257 @@ def test_a_second_end_of_scan_does_not_probe_again():
 
     engine._end_scan()
     assert len(engine.reader.commands) == after_first
+
+
+# -- aircraft ----------------------------------------------------------------
+#
+# Aircraft tracking is the first thing in the app that is a place the radio
+# *goes* rather than a decoder hung off the audio path, so what is tested here
+# is the borrowing and the giving back: the window, the frequency and the gain
+# all belong to 1090 MHz for the duration and to the station being listened to
+# afterwards.
+
+
+def test_aircraft_tracking_takes_the_full_window_and_gives_it_back():
+    """1090 MHz is a 1 Mbit/s data burst with half-microsecond pulses, so the
+    window is a correctness requirement rather than a preference. Arriving
+    from the AM band at 240 kS/s it has to widen, and put it back after."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.sample_rate = 240_000
+    engine.center_hz = 710_000
+
+    engine.start_adsb()
+    _drain(engine)
+    assert engine.sample_rate == 2_400_000
+    assert engine.reader.tuned[-1] == 1_090_000_000
+    assert engine._adsb is not None
+
+    engine._end_adsb()
+    assert engine.sample_rate == 240_000
+    assert engine.reader.tuned[-1] == 710_000
+    assert engine._adsb is None
+
+
+def test_the_radio_is_reported_as_busy_the_instant_it_is_asked():
+    """Same reason as `scanning`: the request is a command for the DSP
+    thread, and a view polling at 5 Hz sees the gap between the two."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+
+    engine.start_adsb()
+    assert engine.receiving_adsb  # before the DSP thread has run anything
+    _drain(engine)
+    assert engine.receiving_adsb
+
+    engine._end_adsb()
+    assert not engine.receiving_adsb
+
+
+def test_aircraft_tracking_measures_the_gain_for_1090_mhz():
+    """The quietest band the app ever visits. Arriving on the FM band's
+    8-12 dB would throw away most of the sky."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+
+    assert engine.reader.commands, "no gain probe was queued"
+    engine.reader.commands[-1](FakeGainDevice())
+    assert engine.gain is not None
+
+
+def test_a_failing_gain_probe_does_not_abandon_reception():
+    """A refused command is a diagnosable condition, not a reason to stop:
+    the receiver still runs, at whatever gain was already set."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+
+    class Broken(FakeGainDevice):
+        def set_manual_gain(self, enabled: bool) -> None:
+            raise RuntimeError("dongle went away")
+
+    engine.reader.commands[-1](Broken())  # must not raise
+    assert engine.last_error is not None
+    assert engine._adsb is not None
+
+
+def test_a_scan_and_aircraft_tracking_do_not_both_take_the_radio():
+    """Both borrow the frequency and the window and put them back. Two of
+    them at once would have each restoring the other's idea of 'before'."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+
+    engine.start_adsb()
+    _drain(engine)
+    engine.start_scan(88e6, 108e6)
+    assert not engine.scanning
+
+    engine._end_adsb()
+    engine.start_scan(88e6, 108e6)
+    _drain(engine)
+    engine.start_adsb()
+    assert not engine.receiving_adsb
+
+
+def test_narrowing_the_window_stops_aircraft_tracking_and_says_so():
+    """Below 2 MS/s the bit slicer is interpolating detail that is not in the
+    data. Sitting there decoding nothing while the screen claims to be
+    listening is the one outcome worse than stopping."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+
+    engine.center_hz = 94_900_000
+    engine._apply_sample_rate(240_000)
+    assert engine._adsb is None
+    assert not engine.receiving_adsb
+    assert engine.last_error is not None
+    # The tuner still has to come back, or the radio sits at 1090 MHz while
+    # `center_hz` says 94.9 and the app has quietly gone deaf. The window the
+    # user just asked for is theirs to keep, though.
+    assert engine.reader.tuned[-1] == 94_900_000
+    assert engine._adsb_resume_rate is None
+
+
+def test_a_window_change_that_is_still_wide_enough_rebuilds_the_receiver():
+    """Every timing number in the receiver comes from the sample rate, so one
+    that outlived a rate change would be reading a grid that had moved."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+    first = engine._adsb
+
+    engine._apply_sample_rate(2_048_000)
+    assert engine._adsb is not None
+    assert engine._adsb is not first
+    assert engine._adsb.sample_rate == 2_048_000
+
+
+def test_a_second_stop_does_not_probe_again():
+    """`stop_adsb` queues `_end_adsb` unconditionally and a window change can
+    have ended reception already. A repeat probe is 340 ms of dead air."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+    engine._end_adsb()
+    after_first = len(engine.reader.commands)
+
+    engine._end_adsb()
+    assert len(engine.reader.commands) == after_first
+
+
+def test_a_decoded_aircraft_reaches_the_mailbox():
+    """The whole path from a block of IQ to something a view can show."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+
+    even_lat, even_lon = gen.cpr_encode(47.6, -122.3, odd=False)
+    iq = gen.burst(
+        [
+            gen.squitter(0x4B1234, gen.identity_me("BAW49")),
+            gen.squitter(
+                0x4B1234,
+                gen.position_me(11, 31_000, False, even_lat, even_lon),
+            ),
+        ],
+        rate=2_400_000,
+    )
+    engine._feed_adsb(iq)
+
+    state = engine.adsb_update()
+    assert state is not None
+    assert [plane.address for plane in state.aircraft] == ["4B1234"]
+    assert state.aircraft[0].callsign == "BAW49"
+    assert state.aircraft[0].altitude_ft == 31_000
+
+
+def test_an_empty_sky_is_published_the_moment_reception_is_asked_for():
+    """Otherwise a view polling every 200 ms repopulates itself from the last
+    session's aircraft in the gap before the DSP thread acts."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+    engine._feed_adsb(
+        gen.burst([gen.squitter(0x4B1234, gen.identity_me("BAW49"))], rate=2_400_000)
+    )
+    assert engine.adsb_update().aircraft
+
+    engine._end_adsb()
+    engine.start_adsb()
+    assert engine.adsb_update().aircraft == ()
+
+
+def test_the_frequency_being_listened_to_survives_the_excursion():
+    """`center_hz` means the frequency the *user* is on, and every view reads
+    it to set itself up. Moving it to 1090 MHz had the listening screen take
+    the band plan's aircraft entry - `raw` mode, and the 49.6 dB a quiet band
+    asks for - and apply both to the FM station underneath. A sweep borrows
+    the tuner without touching it, and so does this."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.center_hz = 94_900_000
+
+    engine.start_adsb()
+    _drain(engine)
+    assert engine.center_hz == 94_900_000
+    assert engine.reader.tuned[-1] == 1_090_000_000
+
+    engine._end_adsb()
+    assert engine.center_hz == 94_900_000
+    assert engine.reader.tuned[-1] == 94_900_000
+
+
+def test_the_gain_measured_on_the_way_back_cannot_be_suppressed():
+    """The listening screen asks for a gain the instant it is shown, which
+    during an aircraft session means a probe queued at 1090 MHz. Going through
+    `auto_gain` here let that one stand in for this one, and an FM station
+    came back 50 dB into overload - measured off air, with no RDS and no
+    stereo to show for it."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.center_hz = 94_900_000
+    engine.start_adsb()
+    _drain(engine)
+
+    engine.auto_gain()  # what the arriving screen does
+    before = len(engine.reader.commands)
+    engine._end_adsb()
+
+    # A probe of its own, queued behind the retune rather than skipped
+    # because somebody else's was already in flight.
+    assert len(engine.reader.commands) == before + 1
+    assert engine.reader.tuned[-1] == 94_900_000
+    engine.gain = None
+    engine.reader.commands[-1](FakeGainDevice())
+    assert engine.gain is not None
+
+
+def test_the_audio_stays_parked_until_every_probe_has_landed():
+    """Two probes overlap on the way back: the listening screen asks for one
+    the instant it is shown, and `_end_adsb` submits its own behind the
+    retune. A boolean cleared by the first unparked the audio while the second
+    was still running, which measured 5 to 12 underruns off air - and none at
+    all on the same path with no view starting up beside it."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_adsb()
+    _drain(engine)
+    engine.reader.commands[-1](FakeGainDevice())  # the one for 1090 MHz
+
+    engine.auto_gain()  # what the arriving screen does
+    engine._end_adsb()
+    assert engine.probing
+
+    engine.reader.commands[-2](FakeGainDevice())
+    assert engine.probing, "unparked while the second probe was still to run"
+    engine.reader.commands[-1](FakeGainDevice())
+    assert not engine.probing

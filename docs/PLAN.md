@@ -286,7 +286,35 @@ checklist rather than assuming.
   and share one control signal across channels, and `AudioRecorder` writes
   either. Audio noise reduction is the one stage that mixes down, and it says
   so — see the amendment.
-- ADS-B (1090 MHz) → aircraft callsign list; POCSAG → pager text. Both are strong "look what's out there" demos.
+- **ADS-B (1090 MHz)** → aircraft callsign list.
+
+  **Status: complete and verified on hardware, 2026-08-28.**
+  `decode/adsb.py` takes complex IQ at 2.4 MS/s and produces a list of
+  aircraft with callsign, altitude, position, ground speed, track and climb
+  rate: preamble search on a half-microsecond energy grid, pulse-position
+  slicing from a running sum, CRC-24, DF17/18 extended squitters and DF11
+  all-call replies, and global plus local CPR position decoding. It costs
+  5.6% of a core.
+
+  `Engine.start_adsb` takes the radio to 1090 MHz at the full window, probes
+  the gain there, parks the audio and feeds the receiver from the same DSP
+  block the demodulator would have had - a second consumer of the block, not
+  a second owner of the device - and gives everything back when it stops.
+  `ui/aircraft_view.py` is the third screen, a list that fills itself in with
+  no tuning, no mode and no bandwidth to get wrong.
+
+  Off air, indoors, on the stock aerial: **six aircraft in 70 seconds at
+  ~800 messages a minute**, 248 positions, callsigns and altitudes and tracks
+  all plausible for the Seattle approach, and **0 audio underruns and 0 ring
+  overruns** across the excursion and back to a stereo FM station with its
+  RDS name intact. Findings are in the ADS-B facts section of CLAUDE.md and
+  in **Amendment 9**.
+
+  Two things it deliberately does not do, both for the same reason as RDS. It
+  does not use the checkword's error-correcting capability, and it does not
+  decode altitudes above 50,000 ft, where the encoding changes to one there is
+  no way to check against real air.
+- POCSAG → pager text. A strong "look what's out there" demo.
 - Favourites, recently played, session history.
 
 ### Phase 5 — Packaging
@@ -312,6 +340,10 @@ checklist rather than assuming.
 5. Tune 1.0 MHz (HF, exercises the upconverter path) and confirm AM broadcast audio.
 6. Full 24–1766 MHz sweep completes without a device timeout.
 7. Waterfall runs at 30 fps at 4096-point FFT with no GUI stutter while audio plays.
+8. Open the Aircraft screen, press Listen for aircraft, and confirm the list
+   fills in with callsigns and altitudes; then leave the screen and confirm
+   the station that was playing comes back at its own gain, in stereo, with
+   its RDS name - the hand-back is the half that breaks.
 
 ## Risks
 
@@ -973,7 +1005,14 @@ bookmark named `KUOW`.
   will.
 - **Group 4A clock time, and alternate frequencies (0A blocks C/D).** Both are
   small additions to `RdsDecoder.update`.
-- **HD Radio, ADS-B, POCSAG**, and favourites/recently-played, all untouched.
+- **HD Radio and POCSAG**, and favourites/recently-played, all untouched.
+- **A map for the aircraft screen.** Positions are decoded and shown as
+  numbers; a map is the obvious next step and is a self-contained piece of
+  work. Nothing else needs it.
+- **Aircraft heard while doing something else.** Tracking takes the radio
+  over completely, which is honest but exclusive - a second dongle, or
+  time-slicing against listening, is the only way round it and neither is
+  worth doing yet.
 - **RDS in the Discover list.** Not possible from a sweep — one group takes
   87.6 ms and a dwell is 50 ms — so it would need a second pass that parks on
   each candidate for a second or two. Worth doing, and a different feature
@@ -1099,3 +1138,112 @@ two-second recording wrote a genuine two-channel WAV. **1 audio underrun and
 0 ring overruns** across the whole sequence, which included two mode changes,
 a sample-rate change and a recording. The headless CLI still runs mono at
 100.7% capture with 0 underruns.
+
+---
+
+## Amendment 9 — ADS-B in the app, and what "borrowing the radio" costs (2026-08-28)
+
+The decoder was finished and tested against synthetic bursts a day before any
+of this; wiring it in was expected to be plumbing. It was not, and the reason
+is worth stating in one line: **aircraft tracking is the first feature in the
+app that borrows the radio**, and the app had one existing borrower - the
+sweeper - whose rules had never been written down.
+
+### The shape of it
+
+1090 MHz has nothing to listen to. Mode S is a 1 Mbit/s data burst, so there
+is no demodulator, no audio, and no reason to keep the audio path running -
+`_run` parks the sink for the whole session through the same expression that
+parks it for a gain probe, so parking can never be started by one mechanism
+and ended by the other. The receiver is fed the same block the demodulator
+would have had, which is what the DSP thread already exists to hand out; the
+spectrum keeps updating from it, so the screen shows the band being watched
+rather than freezing.
+
+That leaves the borrowing. `_begin_adsb` remembers the window, widens it,
+parks the tuner at 1090 MHz and measures the gain there; `_end_adsb` puts the
+window back, retunes, and measures again at the frequency being returned to.
+Both are modelled on `_begin_scan` and `_end_scan`, deliberately, down to the
+order of the steps.
+
+### Three ways to get the giving back wrong
+
+All three were found in one offscreen GUI session against real hardware, and
+all three produced an app that looked like it was working.
+
+**`center_hz` is not where the tuner is. It is where the user is.** Every view
+reads it to configure itself, and `_begin_adsb` originally moved it with
+`tune()`. Leaving the aircraft screen then took the listening screen through
+the band plan's *aircraft* entry - `raw` mode, a 2 MHz channel - and asked for
+a gain measurement, which arrived from a 1090 MHz probe at **49.6 dB**. That
+was applied to 94.9 MHz: 50 dB into overload, audio pinned at 0.9 dBFS, no
+RDS, no stereo. The sweeper never had this bug because it borrows the tuner
+without touching `center_hz`, and the display frame carries the *borrowed*
+frequency so the spectrum still says where its samples came from. That is now
+a rule in CLAUDE.md rather than a property of one function.
+
+**The page arriving configures itself from a radio the page leaving has not
+handed back yet.** `_show_page` started the incoming view before stopping the
+outgoing one, so the listening screen read the radio's state mid-excursion.
+Stopping first is not tidiness; it is the ordering the whole hand-back depends
+on.
+
+**A de-duplicated gain probe can be the wrong probe.** `auto_gain` suppresses a
+measurement while one is already queued, which is right when two callers ask
+about the same band and wrong when the queued one was measured 995 MHz away.
+The listening screen asks for one the instant it is shown, so `_end_adsb`
+submits its own directly, behind the retune, and is the last word.
+`_probe_scan_gain` exists for precisely the mirror image of this, and the
+comment there says so - which is not the same as the code having been reused.
+
+### Measured, first sky
+
+Indoors, stock aerial, 70 seconds: six aircraft, ~800 messages a minute, 248
+positions, 0 audio underruns, 0 ring overruns. Callsigns (SKW3857, ASA503,
+ASA1897, N68767, RFS703), altitudes from 1,350 to 6,800 ft and positions
+within a few tenths of a degree of the Seattle approach - all consistent with
+each other frame to frame, which is the check that matters when there is no
+reference to compare against.
+
+Two numbers surprised. **Bad frames outnumber good ones two to one** (2,013
+against 913), which is the candidate gate working as designed - it passes
+anything vaguely preamble-shaped and lets the checkword reject it - and not
+aircraft being missed. It is shown only at Expert, next to the message rate,
+because next to a healthy list it reads as a fault to anyone else. And
+**messages arrive between -3 and -24 dBFS**, so the four strength bars had to
+be respread: the first thresholds, set from first principles against full
+scale, gave every aircraft in view four bars.
+
+### The one decoder bug a real sky found
+
+Nothing synthetic had produced it, and it is the kind that does not announce
+itself: an aircraft near Boeing Field appeared at **57 degrees east**, with a
+latitude still correct to four decimal places, sitting in a list where every
+other row was right.
+
+CPR sends position in two halves, and a *surface* half divides the globe into
+90 degrees of latitude where an *airborne* half uses 360. `_position` passed
+the arriving frame's kind into the decode and applied it to both halves, so an
+aircraft that sent one of each - which is precisely what an aircraft on final
+approach does, within a second or two - had the wrong span applied to half the
+arithmetic. Reproduced synthetically at 11.9 N, 59.6 E from a Seattle
+position: not off the globe, not impossible, just wrong, and there is nothing
+downstream that could ever have noticed. Each stored half now carries the kind
+of frame it came from, and only matching halves pair.
+
+The general lesson is the one the checkword rule already states: this decoder
+would rather report nothing than report something plausible and wrong. The
+guard costs a landing aircraft one pairing cycle, which `_cpr_local` covers
+from the position it already had.
+
+### The screen
+
+The card is *updated*, never rebuilt - an aircraft reports twice a second and
+a rebuilt widget would flicker, fight the scrollbar and slam shut anything
+being read - and the list is only reordered when the set of aircraft changes,
+so rows do not swap places under the cursor. Everything the card says in words
+(`31,000 ft, climbing`, `heading west (272°)`, `Heard 3 s ago`) is a pure
+function tested without a window, and an aircraft that has not said something
+gets no line for it rather than a zero. A vertical rate under 200 ft/min is
+not called a climb, because otherwise every aircraft on the screen is
+permanently climbing and the word stops meaning anything.

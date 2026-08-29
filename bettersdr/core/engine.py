@@ -28,6 +28,16 @@ from ..audio.record import (
     RecordingLimits,
     timestamped_name,
 )
+from ..decode.adsb import (
+    FREQUENCY_HZ as ADSB_FREQUENCY_HZ,
+)
+from ..decode.adsb import (
+    MIN_SAMPLE_RATE_HZ as ADSB_MIN_SAMPLE_RATE_HZ,
+)
+from ..decode.adsb import (
+    AdsbReceiver,
+    AdsbState,
+)
 from ..decode.rds import MIN_IF_RATE_HZ, RdsReceiver, RdsState
 from ..dsp import convert, demod
 from ..dsp.chain import AudioChain, FrontEnd
@@ -65,6 +75,14 @@ def dsp_block_bytes_for(sample_rate_hz: float) -> int:
 # GUI never waits on a frame, and far below the block rate so we do not compute
 # frames nobody will look at.
 SPECTRUM_HZ = 45.0
+# How often the aircraft list is republished while ADS-B is running. Far
+# slower than the spectrum on purpose: an aircraft reports about twice a
+# second, so a faster rate only re-sorts a list that has not changed.
+ADSB_UPDATE_HZ = 5.0
+# What a block produces when the radio is doing something that is not
+# listening. Shared rather than allocated per block, and shaped so the
+# recorders can be handed it without a special case.
+_NO_AUDIO = np.zeros(0, dtype=np.float32)
 
 
 class Mailbox[T]:
@@ -268,6 +286,12 @@ class Engine:
         self.stereo_enabled = True
         self._stereo: StereoDecoder | None = None
         self._stereo_out = False
+        # Aircraft tracking is a place the radio *goes*, not a decoder hung
+        # off the audio path: 1090 MHz has nothing to listen to and the
+        # receiver needs the whole 2.4 MHz window. So it is shaped like a
+        # scan - park the audio, remember where to come back to - rather than
+        # like RDS.
+        self._adsb: AdsbReceiver | None = None
 
         # The two optional chains either side of the demodulator. Both are a
         # no-op until something is switched on; see `dsp/chain.py`.
@@ -291,6 +315,7 @@ class Engine:
         self._apply_stereo()
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
         self._scan_mailbox: Mailbox[ScanUpdate] = Mailbox()
+        self._adsb_mailbox: Mailbox[AdsbState] = Mailbox()
         self._commands: queue.Queue[Callable[[], None]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -305,14 +330,51 @@ class Engine:
         # Set the instant a scan is asked for, cleared when the sweep ends.
         # See `scanning` for why this is not just "is there a sweeper".
         self._scan_wanted = threading.Event()
+        # The same again for aircraft tracking, for the same reason: a view
+        # polling at 20 Hz must not see "not receiving" in the gap between
+        # the request and the DSP thread acting on it.
+        self._adsb_wanted = threading.Event()
+        # Where the tuner is parked while it is on loan. Deliberately *not*
+        # `center_hz`, which means the frequency the user is listening to -
+        # see `_begin_adsb`.
+        self._adsb_center_hz: int | None = None
+        self._adsb_resume_rate: int | None = None
+        self._adsb_published = 0.0
         # Set while a gain measurement is queued on the reader thread, so two
         # callers asking at once produce one probe rather than two.
         self._gain_pending = threading.Event()
+        # How many probes are actually in flight, which is a different
+        # question from whether another one would be de-duplicated: the
+        # excursion paths deliberately do not de-duplicate, so two can be
+        # queued at once. A boolean cleared by the first of them unparked the
+        # audio while the second was still running - measured at 5 to 12
+        # underruns on the way back from the aircraft screen, and at none at
+        # all on the same path without a view starting up beside it.
+        self._probe_lock = threading.Lock()
+        self._probes = 0
         # Whether audio is currently parked for the duration of one. See
         # `_run`; the DSP thread owns this and nothing else touches it.
         self._sink_parked = False
 
     # -- lifecycle ---------------------------------------------------------
+
+    @property
+    def probing(self) -> bool:
+        """Whether any gain measurement is running on the reader thread.
+
+        Every probe is time with no capture in flight - 340 ms of it on a
+        strong band - so this is what parks the audio. Counted rather than
+        flagged because two probes can legitimately overlap.
+        """
+        return self._probes > 0
+
+    def _probe_started(self) -> None:
+        with self._probe_lock:
+            self._probes += 1
+
+    def _probe_finished(self) -> None:
+        with self._probe_lock:
+            self._probes = max(0, self._probes - 1)
 
     def start(self, center_hz: int | None = None) -> Engine:
         if self._thread is not None:
@@ -427,12 +489,14 @@ class Engine:
             # buffer and cost 23 underruns for a single hop.
             return
         self._gain_pending.set()
+        self._probe_started()
 
         def command(device: Device) -> None:
             try:
                 self.gain = choose_gain(device)
             finally:
                 self._gain_pending.clear()
+                self._probe_finished()
 
         self.reader.submit(command)
 
@@ -689,7 +753,7 @@ class Engine:
         Audio stops for the duration - the radio is somewhere else entirely
         for most of it - and resumes on the frequency it was tuned to before.
         """
-        if self.reader is None or self.scanning:
+        if self.reader is None or self.scanning or self.receiving_adsb:
             return
         # The window belongs to the band being swept, not to whatever the
         # receiver happens to be listening through. This used to fall back to
@@ -721,6 +785,45 @@ class Engine:
     def stop_scan(self) -> None:
         """Abandon a scan and go back to listening."""
         self._commands.put(self._end_scan)
+
+    # -- aircraft ----------------------------------------------------------
+
+    @property
+    def receiving_adsb(self) -> bool:
+        """Whether aircraft tracking is wanted, not whether it has started.
+
+        Same reasoning as `scanning`: the request is a command for the DSP
+        thread, so a view polling at 20 Hz would otherwise see "not receiving"
+        in the gap and conclude the radio had given up.
+        """
+        return self._adsb_wanted.is_set()
+
+    def adsb_update(self) -> AdsbState | None:
+        """The current sky, or None if nothing has been decoded yet."""
+        return self._adsb_mailbox.peek()
+
+    def start_adsb(self) -> None:
+        """Point the radio at 1090 MHz and read what aircraft say about
+        themselves.
+
+        This takes the radio over completely - a different frequency, the full
+        window, its own gain - so it is shaped like a scan rather than like
+        RDS: audio stops for the duration and the frequency being listened to
+        comes back afterwards. There is nothing to listen to at 1090 MHz; the
+        signal is a 1 Mbit/s data burst and the audio path would only hiss.
+        """
+        if self.reader is None or self.scanning or self.receiving_adsb:
+            return
+        # Emptied here rather than when the receiver is built, so a view
+        # polling every 200 ms cannot repopulate itself from the last
+        # session's aircraft in the gap before the DSP thread acts.
+        self._adsb_mailbox.put(AdsbState())
+        self._adsb_wanted.set()
+        self._commands.put(self._begin_adsb)
+
+    def stop_adsb(self) -> None:
+        """Go back to the frequency that was being listened to."""
+        self._commands.put(self._end_adsb)
 
     # -- DSP thread --------------------------------------------------------
 
@@ -770,6 +873,7 @@ class Engine:
         if reader is None:
             return
         first = safe_center_hz(sweeper.current_hz)
+        self._probe_started()
 
         def command(device: Device) -> None:
             try:
@@ -780,6 +884,8 @@ class Engine:
                 # A refused command is a diagnosable condition, not a reason
                 # to stop: the sweep still measures, just at the old gain.
                 self.last_error = f"Could not measure the gain to scan with: {exc}"
+            finally:
+                self._probe_finished()
 
         reader.submit(command)
 
@@ -867,6 +973,182 @@ class Engine:
             )
         )
 
+    # -- aircraft, on the DSP thread ---------------------------------------
+
+    def _begin_adsb(self) -> None:
+        """Take the radio to 1090 MHz and start the receiver.
+
+        Ordered the way `_begin_scan` is, and for the same reasons: the window
+        is set before the tuner moves, so the reader's queue puts both in
+        place in one go, and the gain is measured last, at the frequency the
+        receiver will actually run on. The audio sink is not touched here -
+        `_run` parks it for as long as `self._adsb` is set, which keeps one
+        mechanism responsible for parking rather than two.
+
+        The tuner is moved directly rather than through `tune`, and that is
+        the line that matters here. `center_hz` means *the frequency the user
+        is listening to*, and every view reads it to decide what the radio is
+        pointed at - so a screen shown during the excursion configures itself
+        for 1090 MHz. Measured off air: leaving this screen took the listening
+        screen through the band plan's aircraft entry, which gave an FM
+        station `raw` mode and the 49.6 dB the quiet 1090 MHz band had asked
+        for - 50 dB into overload, with no RDS and no stereo. A sweep borrows
+        the tuner without touching `center_hz` for exactly this reason; so
+        does this.
+        """
+        if self.reader is None:
+            return
+        self._adsb_resume_rate = self.sample_rate
+        # ADS-B is 1 Mbit/s and the pulses are half a microsecond, so this is
+        # the one feature in the app with a hard floor under the window width
+        # rather than a preference about it. `safe_sample_rate` cannot narrow
+        # anything at 1090 MHz - it only guards windows that would reach 0 Hz
+        # - so the full rate is what arrives.
+        rate = safe_sample_rate(
+            ADSB_FREQUENCY_HZ, preferred_hz=int(DEFAULT_SAMPLE_RATE)
+        )
+        if rate < ADSB_MIN_SAMPLE_RATE_HZ:
+            self._adsb_wanted.clear()
+            self.last_error = (
+                "Aircraft tracking needs a wider window than this radio can "
+                "give at 1090 MHz."
+            )
+            return
+        if rate != self.sample_rate:
+            self.sample_rate = rate
+            self.reader.set_sample_rate(rate)
+            self._apply_sample_rate(rate)
+        self._adsb_center_hz = safe_center_hz(ADSB_FREQUENCY_HZ)
+        # Offset tuning is carried the same way `device_center_hz` carries it,
+        # so the front end's shift lands the signal in the middle and the
+        # display label stays honest. The decoder itself could not care less:
+        # it works on magnitude, which a frequency shift does not change.
+        self.reader.tune(safe_center_hz(ADSB_FREQUENCY_HZ + self.front.offset_hz))
+        self._adsb = AdsbReceiver(float(self.sample_rate))
+        self._adsb_published = 0.0
+        self._probe_gain_directly("aircraft tracking")
+
+    def _probe_gain_directly(self, what: str) -> None:
+        """Measure the gain wherever the tuner is now, without de-duplicating.
+
+        Gain belongs to the band, and 1090 MHz is the quietest the app ever
+        visits: an aircraft 200 km away arrives a few dB above the noise, and
+        going there on the FM band's 8-12 dB would throw away most of the sky.
+        `choose_gain` steps down only for clipping, so on a quiet band it
+        accepts a high setting almost at once. Coming back is the same problem
+        in reverse - 49.6 dB measured at 1090 MHz turns an FM station into a
+        solid wall.
+
+        Deliberately not through `auto_gain`, at either end. That suppresses a
+        probe while one is already queued, and the queued one may have been
+        measured somewhere else entirely: the listening screen asks for a gain
+        the instant it is shown, which during an aircraft session means
+        1090 MHz. Submitting directly puts this measurement behind the retune
+        in the reader's queue, so it is the last word. `_probe_scan_gain`
+        exists for the mirror image of this.
+
+        It still joins the probe count, because this is 340 ms on the reader
+        thread with no capture in flight and the audio has to be parked for
+        it. It does not touch `_gain_pending`: that flag means "another probe
+        would be redundant", which is exactly what this one is not.
+        """
+        reader = self.reader
+        if reader is None:
+            return
+        self._probe_started()
+
+        def command(device: Device) -> None:
+            try:
+                self.gain = choose_gain(device)
+            except Exception as exc:  # noqa: BLE001 - never abandon reception
+                self.last_error = f"Could not measure the gain for {what}: {exc}"
+            finally:
+                # In a `finally` for the same reason `auto_gain` does it: a
+                # count left standing parks the audio for good.
+                self._probe_finished()
+
+        reader.submit(command)
+
+    def _end_adsb(self) -> None:
+        """Put the radio back where it was listening.
+
+        `stop_adsb` queues this unconditionally and it is also reached when
+        the window is taken below what the receiver needs, so like `_end_scan`
+        a second pass must not repeat the work - a gain probe in particular is
+        340 ms of dead air.
+        """
+        receiver, self._adsb = self._adsb, None
+        was_receiving = receiver is not None
+        self._adsb_wanted.clear()
+        self._adsb_center_hz = None
+        if self._adsb_resume_rate is not None:
+            # Before the retune, so the window is back the way it was and only
+            # then does the tuner move. Same order as `_end_scan`.
+            if self._adsb_resume_rate != self.sample_rate:
+                self.sample_rate = self._adsb_resume_rate
+                if self.reader is not None:
+                    self.reader.set_sample_rate(self.sample_rate)
+                self._apply_sample_rate(self.sample_rate)
+            self._adsb_resume_rate = None
+        if was_receiving and self.reader is not None:
+            # `center_hz` never moved, so this is a retune only in the
+            # hardware's terms: it puts the tuner back under the frequency the
+            # user believed they were on the whole time.
+            self.reader.tune(self.device_center_hz)
+            # After the retune, so the probe measures at the frequency being
+            # returned to. 1090 MHz takes a far higher gain than any broadcast
+            # band, and leaving it would hand back a clipped station.
+            self._probe_gain_directly("listening again")
+
+    def _feed_adsb(self, iq: np.ndarray) -> None:
+        """Hand one block to the receiver and republish the sky, slowly.
+
+        The receiver keeps its own clock from the sample count, so it is fed
+        every block; only the snapshot is throttled. An aircraft reports about
+        twice a second, so rebuilding the list at the block rate would sort
+        the same list forty times over.
+        """
+        receiver = self._adsb
+        if receiver is None:
+            return
+        receiver.process(iq)
+        now = time.perf_counter()
+        if now - self._adsb_published < 1.0 / ADSB_UPDATE_HZ:
+            return
+        self._adsb_published = now
+        self._adsb_mailbox.put(receiver.snapshot())
+
+    def _apply_adsb_rate(self, rate: int) -> None:
+        """Follow a window change, or give up honestly if it is too narrow.
+
+        Every timing number in the receiver is derived from the sample rate,
+        so one that outlived a rate change would be reading a grid that had
+        moved. Below the floor there is no receiver to rebuild: reception
+        stops and says so, rather than sitting there decoding nothing while
+        the screen claims to be listening.
+
+        Stopping this way still hands the tuner back - otherwise it would sit
+        at 1090 MHz while `center_hz` said 94.9 and the app would simply have
+        gone deaf - but it keeps the window the user just asked for. Only what
+        was borrowed is returned.
+        """
+        if self._adsb is None:
+            return
+        if rate >= ADSB_MIN_SAMPLE_RATE_HZ:
+            self._adsb = AdsbReceiver(float(rate))
+            return
+        self._adsb = None
+        self._adsb_wanted.clear()
+        self._adsb_center_hz = None
+        self._adsb_resume_rate = None
+        if self.reader is not None:
+            self.reader.tune(self.device_center_hz)
+            self._probe_gain_directly("listening again")
+        self.last_error = (
+            "Aircraft tracking stopped: the window is now too narrow to "
+            "read 1 Mbit/s data bursts."
+        )
+
     def _apply_sample_rate(self, rate: int) -> None:
         """Rebuild everything that was built around the old rate.
 
@@ -899,6 +1181,7 @@ class Engine:
         # 2.4 MS/s is a two-and-a-half second one at 240 kS/s.
         self.front.set_sample_rate(float(rate))
         self._rebuild(self.mode, self._demod.bandwidth_hz)
+        self._apply_adsb_rate(rate)
         if self.sink is not None:
             self.sink.start()
 
@@ -1100,10 +1383,14 @@ class Engine:
             # buffer. So audio is parked for the duration rather than left to
             # starve: an underrun count full of expected underruns cannot
             # report a real fault. Same reasoning as `_begin_scan`.
-            probing = self._gain_pending.is_set()
-            if probing != self._sink_parked:
-                self._sink_parked = probing
-                if probing:
+            # Aircraft tracking parks it too, for its whole duration: the
+            # radio is 1090 MHz away from anything anybody wanted to hear.
+            # One expression, so parking cannot be started by one mechanism
+            # and ended by the other.
+            parked = self.probing or self._adsb is not None
+            if parked != self._sink_parked:
+                self._sink_parked = parked
+                if parked:
                     sink.stop()
                 else:
                     sink.start()
@@ -1121,9 +1408,17 @@ class Engine:
             # yet, and one written from further down the path would carry this
             # session's noise blanker and IQ correction baked in.
             iq = self.front.process(convert.to_complex(raw))
-            audio = self.audio.process(self._demod.process(iq))
-            self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
-            sink.write(audio)
+            if self._adsb is not None:
+                # No demodulator and no audio. Mode S is a 1 Mbit/s data
+                # burst: the audio path would produce hiss at the cost of
+                # 63 ms per second of radio, and the sink is parked anyway.
+                self._feed_adsb(iq)
+                self._stereo_out = False
+                audio = _NO_AUDIO
+            else:
+                audio = self.audio.process(self._demod.process(iq))
+                self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
+                sink.write(audio)
             self._service_recorders(raw, audio)
 
             capture = self._capture
@@ -1150,14 +1445,32 @@ class Engine:
             self._carry = np.empty(0, dtype=np.complex64)
             if spectrum_db.size == 0:
                 continue
-            squelch = self._demod.squelch
+            # With the demodulator bypassed its last readings are from
+            # whatever was being listened to minutes ago, so the strongest
+            # thing in the window is reported instead - true, and about the
+            # only meaningful level for a band of half-microsecond bursts.
+            listening = self._adsb is None
+            squelch = self._demod.squelch if listening else None
             self._mailbox.put(
                 DisplayFrame(
                     spectrum_db=spectrum_db,
-                    center_hz=float(self.center_hz),
+                    # Where the samples came from, which during an aircraft
+                    # session is not what the radio is tuned to in the user's
+                    # terms. Labelling 1090 MHz data 94.9 MHz would put every
+                    # signal on the display in the wrong place, which is the
+                    # one mistake a spectrum must not make.
+                    center_hz=float(
+                        self.center_hz
+                        if self._adsb_center_hz is None
+                        else self._adsb_center_hz
+                    ),
                     sample_rate=float(self.sample_rate),
                     bin_width_hz=self._spectrum.bin_width_hz,
-                    channel_power_dbfs=self._demod.channel_power_dbfs,
+                    channel_power_dbfs=(
+                        self._demod.channel_power_dbfs
+                        if listening
+                        else float(np.max(spectrum_db))
+                    ),
                     bandwidth_hz=self._demod.bandwidth_hz,
                     squelch_open=None if squelch is None else squelch.is_open,
                     audio_latency_s=sink.latency_s,

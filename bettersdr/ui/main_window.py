@@ -26,6 +26,7 @@ from ..core.bookmarks import BookmarkStore
 from ..core.engine import Engine
 from ..core.settings import Settings
 from ..scan.classifier import Signal
+from .aircraft_view import AircraftView
 from .discover_view import DiscoverView
 from .levels import Level
 from .listen_view import ListenView
@@ -96,6 +97,7 @@ class MainWindow(QMainWindow):
         self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore.open()
         self.view: ListenView | None = None
         self.discover: DiscoverView | None = None
+        self.aircraft: AircraftView | None = None
         self._stack: QStackedWidget | None = None
 
         root = QWidget()
@@ -127,10 +129,12 @@ class MainWindow(QMainWindow):
                 settings=settings,
                 bookmarks=self.bookmarks,
             )
+            self.aircraft = AircraftView(engine, level=level)
             self.discover.listenRequested.connect(self._listen_to)
             self._stack = QStackedWidget()
             self._stack.addWidget(self.discover)
             self._stack.addWidget(self.view)
+            self._stack.addWidget(self.aircraft)
             layout.addWidget(self._stack, 1)
 
         self.setCentralWidget(root)
@@ -182,7 +186,7 @@ class MainWindow(QMainWindow):
 
         self._nav = QButtonGroup(self)
         self._nav.setExclusive(True)
-        for index, name in enumerate(("Discover", "Listen")):
+        for index, name in enumerate(("Discover", "Listen", "Aircraft")):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -208,7 +212,7 @@ class MainWindow(QMainWindow):
 
     def _level_changed(self, value: int) -> None:
         level = Level(value)
-        for page in (self.discover, self.view):
+        for page in (self.discover, self.view, self.aircraft):
             if page is not None:
                 page.set_level(level)
         if self.settings is not None:
@@ -219,19 +223,27 @@ class MainWindow(QMainWindow):
             self.settings.save()
 
     def _show_page(self, index: int) -> None:
-        """Switch views, and stop the one leaving so it costs nothing.
+        """Switch views, and stop the ones leaving so they cost nothing.
 
-        Both pages poll the engine on a timer. A hidden page that kept polling
-        would repaint widgets nobody can see and, worse, keep asking a scan
-        for progress after the user has walked away from it.
+        Every page polls the engine on a timer. A hidden page that kept
+        polling would repaint widgets nobody can see and, worse, keep asking a
+        scan for progress after the user has walked away from it.
+
+        Stopping comes first, and that is not tidiness. A page can have the
+        radio on loan - the aircraft screen parks it at 1090 MHz - and the
+        page arriving reads the radio's state to set itself up. Started first,
+        the listening screen took the band plan's aircraft entry and applied
+        it to the FM station underneath.
         """
         if self._stack is None:
             return
-        pages = (self.discover, self.view)
+        pages = (self.discover, self.view, self.aircraft)
         for position, page in enumerate(pages):
-            if page is None:
-                continue
-            page.start() if position == index else page.stop()
+            if page is not None and position != index:
+                page.stop()
+        arriving = pages[index] if 0 <= index < len(pages) else None
+        if arriving is not None:
+            arriving.start()
         self._stack.setCurrentIndex(index)
         button = self._nav.button(index)
         if button is not None:
@@ -282,7 +294,7 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
 
     def closeEvent(self, event) -> None:
-        for page in (self.discover, self.view):
+        for page in (self.discover, self.view, self.aircraft):
             if page is not None:
                 page.stop()
         if self.view is not None:
