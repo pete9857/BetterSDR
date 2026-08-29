@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication
 from .core.bookmarks import BookmarkStore
 from .core.device import device_count
 from .core.engine import Engine
+from .core.history import History
 from .core.settings import Settings
 from .ui.levels import Level
 from .ui.main_window import MainWindow
@@ -102,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         level=Level[level_name.upper()],
         settings=None if args.no_settings else settings,
         bookmarks=BookmarkStore.open(),
+        # Opened whatever `--no-settings` says, the same as the bookmarks:
+        # that flag is about the remembered *preferences*, and what was
+        # listened to is the user's own list rather than a setting.
+        history=History.open(),
     )
     window.show()
     return app.exec()

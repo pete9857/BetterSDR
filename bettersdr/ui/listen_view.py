@@ -40,6 +40,7 @@ from ..core.calibrate import calibrate
 from ..core.device import DEFAULT_SAMPLE_RATE
 from ..core.engine import DisplayFrame, Engine
 from ..core.frontend import SUPPORTED_SAMPLE_RATES, GainChoice
+from ..core.history import History, Visit
 from ..core.settings import Settings
 from ..decode import hdradio
 from ..decode.hdradio import HdProgram, HdState
@@ -54,6 +55,7 @@ from .levels import Level
 from .widgets import colormaps
 from .widgets.frequency import FrequencyDisplay
 from .widgets.meter import SignalMeter
+from .widgets.pagerlog import PagerLog
 from .widgets.panel import ControlPanel
 from .widgets.spectrum import BandRibbon, SpectrumWidget
 from .widgets.waterfall import WaterfallWidget
@@ -63,6 +65,10 @@ REFRESH_HZ = 30
 # carrying HD between frames. Once a second is plenty, and the same tick
 # refreshes the status and recording lines.
 SLOW_TICK = REFRESH_HZ
+
+# How many recently played stations the panel offers. The history keeps more;
+# a drop-down longer than this is a list to search rather than a shortcut.
+RECENT_SHOWN = 12
 
 FFT_SIZES = (512, 1024, 2048, 4096, 8192, 16384, 32768)
 WINDOW_LABELS = {
@@ -132,6 +138,7 @@ class ListenView(QWidget):
         level: Level = Level.STANDARD,
         settings: Settings | None = None,
         bookmarks: BookmarkStore | None = None,
+        history: History | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -139,6 +146,7 @@ class ListenView(QWidget):
         self.level = level
         self.settings = settings
         self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore()
+        self.history = history if history is not None else History()
         self._frames = 0
         self._auto_ranged = False
         # The GainChoice currently shown in the spin box, so the display
@@ -255,8 +263,14 @@ class ListenView(QWidget):
         self._splitter.setStretchFactor(0, 4)
         self._splitter.setStretchFactor(1, 6)
         self._splitter.setHandleWidth(2)
+        # Under the splitter rather than in it: the split slider divides the
+        # spectrum from the waterfall, and a third pane in there would make
+        # that control mean something different every time a pager turned up.
+        self.pager = PagerLog(self.level)
+
         layout.addWidget(self.ribbon)
         layout.addWidget(self._splitter, 1)
+        layout.addWidget(self.pager)
         return display
 
     # -- the control column ------------------------------------------------
@@ -267,6 +281,7 @@ class ListenView(QWidget):
         self._build_radio_section()
         self._build_recording_section()
         self._build_bookmark_section()
+        self._build_history_section()
         self._build_display_section()
         self._build_processing_section()
         self._build_correction_section()
@@ -411,6 +426,17 @@ class ListenView(QWidget):
         )
         section.add_wide(self.stereo, Level.STANDARD)
 
+        self.stereo_blend = QCheckBox("Fade to mono on weak stations")
+        self.stereo_blend.setChecked(self.engine.stereo_blend)
+        self.stereo_blend.toggled.connect(self.engine.set_stereo_blend)
+        self.stereo_blend.setToolTip(
+            "The left-minus-right signal sits in the noisiest part of an FM "
+            "broadcast, so on a distant station stereo is mostly hiss. This "
+            "fades it out as the station weakens, which trades the stereo "
+            "effect for a quieter, steadier sound."
+        )
+        section.add_wide(self.stereo_blend, Level.EXPERT)
+
         self.rds = QCheckBox("Read station names (RDS)")
         self.rds.setChecked(self.engine.rds_enabled)
         self.rds.toggled.connect(self.engine.set_rds)
@@ -420,6 +446,16 @@ class ListenView(QWidget):
             "arrive and a weak station may never manage it."
         )
         section.add_wide(self.rds, Level.STANDARD)
+
+        self.pocsag = QCheckBox("Read pager messages (POCSAG)")
+        self.pocsag.setChecked(self.engine.pocsag_enabled)
+        self.pocsag.toggled.connect(self.engine.set_pocsag)
+        self.pocsag.setToolTip(
+            "Pagers are still used by hospitals and factories, and they send "
+            "their messages as plain text. When a channel carries them, they "
+            "appear in a panel under the waterfall."
+        )
+        section.add_wide(self.pocsag, Level.STANDARD)
 
         self.tuner_agc = QCheckBox("Let the tuner set its own gain")
         self.tuner_agc.toggled.connect(self.engine.set_tuner_agc)
@@ -469,9 +505,45 @@ class ListenView(QWidget):
         self.save_button.clicked.connect(self._save_current)
         section.add_wide(self.save_button)
 
+        # A favourite implies a saved entry, so this saves first where there
+        # is nothing to star yet. Two presses to get a station onto the
+        # landing screen would be one too many for the thing that is supposed
+        # to be the shortcut.
+        self.favourite_button = _button("Add to my favourites")
+        self.favourite_button.setToolTip(
+            "Favourites appear on the Discover screen, so you can go straight "
+            "back to them without scanning."
+        )
+        self.favourite_button.clicked.connect(self._toggle_favourite)
+        section.add_wide(self.favourite_button)
+
         manage = _button("Open my list...")
         manage.clicked.connect(self.open_frequency_manager)
         section.add_wide(manage)
+
+    def _build_history_section(self) -> None:
+        """Where the radio has been - at Simple too, where nothing else is.
+
+        Simple has no mode control, no bandwidth and no gain, so a beginner
+        who tunes away from something they were enjoying has no way back to
+        it. This is that way back, and it is the one panel section that is
+        more use the less of the app somebody understands.
+        """
+        section = self.panel.section("Recently played", Level.SIMPLE)
+
+        self.back_button = _button("Back to the last station")
+        self.back_button.setEnabled(False)
+        self.back_button.clicked.connect(self._go_back)
+        section.add_wide(self.back_button)
+
+        self.recent_list = QComboBox()
+        self.recent_list.setToolTip(
+            "Everything you have listened to for more than a few seconds."
+        )
+        self.recent_list.activated.connect(self._recent_chosen)
+        section.add_wide(self.recent_list)
+        self._recent_shown: tuple[tuple[int, str], ...] = ()
+        self._refresh_history_controls()
 
     def _build_display_section(self) -> None:
         section = self.panel.section("Display", Level.STANDARD)
@@ -651,6 +723,7 @@ class ListenView(QWidget):
     def set_level(self, level: Level) -> None:
         self.level = level
         self.panel.set_level(level)
+        self.pager.set_level(level)
         # The panel shows every row that belongs at the new level, including
         # the ones this view hides for having nothing to say.
         self._refresh_recording()
@@ -691,7 +764,9 @@ class ListenView(QWidget):
         self.split.setValue(int(float(settings["split_ratio"]) * 100))
         self.ppm.setValue(int(settings["ppm"]))
         self.rds.setChecked(bool(settings["rds"]))
+        self.pocsag.setChecked(bool(settings["pocsag"]))
         self.stereo.setChecked(bool(settings["stereo"]))
+        self.stereo_blend.setChecked(bool(settings["stereo_blend"]))
         self.hd.setChecked(bool(settings["hd"]) and self._hd_available)
 
     def remember(self) -> None:
@@ -712,7 +787,9 @@ class ListenView(QWidget):
             split_ratio=self.split.value() / 100.0,
             ppm=self.ppm.value(),
             rds=self.rds.isChecked(),
+            pocsag=self.pocsag.isChecked(),
             stereo=self.stereo.isChecked(),
+            stereo_blend=self.stereo_blend.isChecked(),
             hd=self.hd.isChecked(),
             frequency_hz=self.frequency.value_hz,
             mode=self.mode.currentData(),
@@ -729,6 +806,9 @@ class ListenView(QWidget):
         self._apply_band_defaults(hz)
         self._guard_window()
         self._sync_save_button()
+        # After the band defaults, not before: they are what decides the mode
+        # and bandwidth this visit will be remembered with.
+        self._record_visit(hz)
 
     def _apply_band_defaults(self, hz: float, force: bool = False) -> None:
         """Take mode and bandwidth from the band plan when the band changes.
@@ -826,6 +906,7 @@ class ListenView(QWidget):
         if bandwidth_hz is not None:
             self.bandwidth.setValue(bandwidth_hz / 1000.0)
         self._sync_save_button()
+        self._record_visit(hz)
 
     def _tune_from_display(self, hz: float) -> None:
         """Click-to-tune, snapped to the band's channel raster if it has one.
@@ -926,6 +1007,10 @@ class ListenView(QWidget):
         self._hd_labels = []
         self._station = None
         self._station_name = ""
+        # Pager messages belong to a channel, not to the app. Carrying them
+        # to the next frequency would put somebody else's traffic under a
+        # heading that says it was heard here.
+        self.pager.clear()
 
     def _hd_offered(self) -> bool:
         """Whether the switch is worth showing at all right now.
@@ -1184,10 +1269,31 @@ class ListenView(QWidget):
         if self._manager is not None:
             self._manager.refresh()
 
+    def _toggle_favourite(self) -> None:
+        """Star this frequency, saving it first if it is not saved yet."""
+        existing = self.bookmarks.find(self.engine.center_hz)
+        if existing is None:
+            self._save_current()
+            existing = self.bookmarks.find(self.engine.center_hz)
+            if existing is None:
+                return
+            self.bookmarks.set_favourite(existing, True)
+        else:
+            self.bookmarks.toggle_favourite(existing)
+        self.bookmarks.save()
+        self._sync_save_button()
+        if self._manager is not None:
+            self._manager.refresh()
+
     def _sync_save_button(self) -> None:
-        saved = self.bookmarks.find(self.engine.center_hz) is not None
+        entry = self.bookmarks.find(self.engine.center_hz)
         self.save_button.setText(
-            "Remove from my list" if saved else "Save this frequency"
+            "Remove from my list" if entry is not None else "Save this frequency"
+        )
+        self.favourite_button.setText(
+            "Remove from my favourites"
+            if entry is not None and entry.favourite
+            else "Add to my favourites"
         )
 
     def open_frequency_manager(self) -> None:
@@ -1200,6 +1306,70 @@ class ListenView(QWidget):
 
     def _tune_to_bookmark(self, entry: Bookmark) -> None:
         self.tune_to(entry.frequency_hz, entry.mode, entry.bandwidth_hz)
+
+    # -- recently played ---------------------------------------------------
+
+    def _record_visit(self, hz: float) -> None:
+        """Tell the history where the radio has gone.
+
+        Called from every path that tunes, with the mode and bandwidth read
+        back off the controls rather than passed in - by this point they have
+        been through the band plan, the classifier or a bookmark, and what is
+        on screen is what the user will actually hear.
+        """
+        band = bandplan.find(hz)
+        self.history.tune(
+            hz,
+            mode=self.mode.currentData(),
+            bandwidth_hz=self.bandwidth.value() * 1000.0,
+            group=band.name if band else "",
+        )
+        self._refresh_history_controls()
+
+    def _go_back(self) -> None:
+        previous = self.history.previous()
+        if previous is not None:
+            self._tune_to_visit(previous)
+
+    def _recent_chosen(self, index: int) -> None:
+        station = self.recent_list.itemData(index)
+        if station is not None:
+            self.tune_to(station.frequency_hz, station.mode, station.bandwidth_hz)
+        # Back to the prompt whatever happened. Leaving the chosen station
+        # showing would make the box read as "this is what is playing", which
+        # it stops being the moment anyone touches the dial.
+        self.recent_list.setCurrentIndex(0)
+
+    def _tune_to_visit(self, visit: Visit) -> None:
+        self.tune_to(visit.frequency_hz, visit.mode, visit.bandwidth_hz)
+
+    def _refresh_history_controls(self) -> None:
+        previous = self.history.previous()
+        self.back_button.setEnabled(previous is not None)
+        self.back_button.setText(
+            f"Back to {previous.label}" if previous else "Back to the last station"
+        )
+
+        recent = self.history.recent(RECENT_SHOWN)
+        signature = tuple((s.frequency_hz, s.label) for s in recent)
+        if signature == self._recent_shown:
+            return
+        # Never while the list is open. Rebuilding a combo box under an open
+        # popup closes it, and the history changes on its own timer - so this
+        # would otherwise snatch the list shut as somebody read it.
+        if self.recent_list.view().isVisible():
+            return
+        self._recent_shown = signature
+        self.recent_list.blockSignals(True)
+        self.recent_list.clear()
+        self.recent_list.addItem(
+            "Recently played..." if recent else "Nothing played yet", None
+        )
+        for station in recent:
+            self.recent_list.addItem(station.label, station)
+        self.recent_list.setCurrentIndex(0)
+        self.recent_list.blockSignals(False)
+        self.recent_list.setEnabled(bool(recent))
 
     def _update_band_label(self, hz: float) -> None:
         band = bandplan.find(hz)
@@ -1221,10 +1391,19 @@ class ListenView(QWidget):
             self._apply_band_defaults(self.engine.center_hz, force=True)
         self._sync_gain()
         self._sync_save_button()
+        # The radio has been on this frequency all along - the user has only
+        # come back to watching it - so this opens a visit rather than
+        # continuing one, and a station listened to across two trips to the
+        # Discover screen is counted once by `History.tune`'s tolerance test.
+        self._record_visit(self.engine.center_hz)
         self._timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+        # Accrue what this stretch was worth, but do not close the visit: the
+        # radio is still playing and the user may be back in two seconds.
+        # `MAX_TICK_SECONDS` is what stops the time spent away being counted.
+        self.history.update()
 
     def _sync_gain(self) -> None:
         """Show what the engine actually picked, if it has picked again.
@@ -1271,6 +1450,13 @@ class ListenView(QWidget):
             self.stereo_badge.setVisible(frame.stereo)
             self._refresh_recording()
             self._update_status(frame)
+            self.pager.update_state(frame.pocsag)
+            # After `_update_status`, which is where `_station_name` is set
+            # from whichever decoder found it. A name read off the air is
+            # what turns "94.9 MHz" in the recent list into "KUOW".
+            self.history.name(self._station_name)
+            self.history.update()
+            self._refresh_history_controls()
 
     def _update_status(self, frame: DisplayFrame) -> None:
         parts = [
@@ -1282,6 +1468,11 @@ class ListenView(QWidget):
             parts.append(f"AGC {frame.agc_gain_db:+.0f} dB")
         if self.engine.front.noise_blanker:
             parts.append(f"blanked {self.engine.front.blanked_samples}")
+        if frame.stereo and frame.stereo_blend < 0.99:
+            # Only while it is doing something. A permanent "stereo 100%" is
+            # a number nobody reads, and its absence is then no longer the
+            # signal that something changed.
+            parts.append(f"stereo {frame.stereo_blend * 100:.0f}%")
         hd = frame.hd
         if hd is not None:
             # MER and BER are for the carrier as a whole, not for the

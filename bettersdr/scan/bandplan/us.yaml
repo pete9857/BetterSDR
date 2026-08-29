@@ -233,6 +233,24 @@ bands:
       Utility meters, sensors and cordless gadgets, all sharing one busy
       stretch of spectrum.
 
+  - name: Pagers
+    scan: true
+    start_hz: 929_000_000
+    end_hz: 932_000_000
+    mode: nfm
+    # Wider than the 12.5 kHz two-way default: a pager transmitter deviates
+    # +/-4.5 kHz and the bits either side of that need room, so a channel
+    # filter sized for speech takes the corners off them.
+    bandwidth_hz: 20_000
+    raster_hz: 25_000
+    raster_base_hz: 929_012_500
+    icon: pager
+    colour: "#b06a8a"
+    description: >
+      Pagers, which hospitals and factories still use because they work in
+      basements and their batteries last a month. The messages are sent in
+      plain text and this app reads them out for you.
+
   - name: Aircraft Tracking
     start_hz: 1_089_000_000
     end_hz: 1_091_000_000

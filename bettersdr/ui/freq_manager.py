@@ -29,8 +29,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.bookmarks import Bookmark, BookmarkStore
+from ..core.bookmarks import Bookmark, BookmarkStore, format_hz
 from ..dsp import demod
+from .widgets.icons import glyph
 
 DIALOG_STYLE = """
 QDialog { background: #0b0e13; }
@@ -93,6 +94,12 @@ class FrequencyManager(QDialog):
 
         buttons = QHBoxLayout()
         self._listen_button = self._button(buttons, "Listen", self._listen)
+        self._favourite_button = self._button(
+            buttons, "Add to favourites", self._favourite
+        )
+        self._favourite_button.setToolTip(
+            "Favourites appear on the Discover screen without scanning."
+        )
         self._rename_button = self._button(buttons, "Rename", self._rename)
         self._delete_button = self._button(buttons, "Delete", self._delete)
         buttons.addStretch(1)
@@ -117,11 +124,16 @@ class FrequencyManager(QDialog):
             parent.setFlags(Qt.ItemFlag.ItemIsEnabled)
             parent.setFirstColumnSpanned(True)
             for entry in self.store.in_group(group):
+                name = entry.name or "(unnamed)"
                 item = QTreeWidgetItem(
                     parent,
                     [
-                        entry.name or "(unnamed)",
-                        entry.label.split(" - ")[-1],
+                        # The star goes in the name rather than in a column
+                        # of its own: a favourite is not a second kind of
+                        # bookmark, it is this one marked, and a separate
+                        # column would invite it to drift out of step.
+                        f"{glyph('star')}  {name}" if entry.favourite else name,
+                        format_hz(entry.frequency_hz),
                         _mode_label(entry.mode),
                         f"{entry.bandwidth_hz / 1000:g} kHz",
                         entry.notes,
@@ -138,13 +150,20 @@ class FrequencyManager(QDialog):
         return items[0].data(0, Qt.ItemDataRole.UserRole)
 
     def _selection_changed(self) -> None:
-        has = self.selected() is not None
+        entry = self.selected()
+        has = entry is not None
         for button in (
             self._listen_button,
+            self._favourite_button,
             self._rename_button,
             self._delete_button,
         ):
             button.setEnabled(has)
+        self._favourite_button.setText(
+            "Remove from favourites"
+            if entry is not None and entry.favourite
+            else "Add to favourites"
+        )
 
     # -- actions -----------------------------------------------------------
 
@@ -152,6 +171,14 @@ class FrequencyManager(QDialog):
         entry = self.selected()
         if entry is not None:
             self.tuneRequested.emit(entry)
+
+    def _favourite(self) -> None:
+        entry = self.selected()
+        if entry is None:
+            return
+        self.store.toggle_favourite(entry)
+        self.store.save()
+        self.refresh()
 
     def _rename(self) -> None:
         entry = self.selected()

@@ -11,16 +11,32 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from bettersdr.core.bookmarks import Bookmark
+from bettersdr.core.history import Station
 from bettersdr.decode.adsb import Aircraft
+from bettersdr.decode.pocsag import Page, PocsagState
 from bettersdr.scan.classifier import Strength
 from bettersdr.ui.levels import Level
-from bettersdr.ui.widgets import aircraftcard, colormaps
+from bettersdr.ui.widgets import aircraftcard, colormaps, pagerlog
 from bettersdr.ui.widgets.frequency import (
     DIGITS,
     digit_step_hz,
     format_digits,
     nudge_digit,
 )
+from bettersdr.ui.widgets.planemap import (
+    MIN_SPAN_NM,
+    Projection,
+    altitude_colour,
+    distance_nm,
+    fit,
+    format_degrees,
+    graticule_step,
+    nice_number,
+    scale_bar,
+    update_trails,
+)
+from bettersdr.ui.widgets.quicktune import ago, quick_list, spent
 
 # -- Colour maps -----------------------------------------------------------
 
@@ -241,3 +257,237 @@ def test_the_provenance_line_grows_with_the_level():
     assert "12 messages" in standard and "ICAO" not in standard
     expert = aircraftcard.heard_line(plane, Level.EXPERT)
     assert "ICAO 4B1234" in expert and "-24 dBFS" in expert
+
+
+# -- Pager messages ---------------------------------------------------------
+
+
+def _page(**kwargs) -> Page:
+    fields = {
+        "capcode": 1234568,
+        "function": 3,
+        "kind": "alphanumeric",
+        "text": "CALL SWITCHBOARD",
+        "baud": 1200,
+        "received": 0.0,
+    }
+    return Page(**(fields | kwargs))
+
+
+def test_a_capcode_is_padded_the_way_operators_write_it():
+    assert pagerlog.capcode_text(1234568) == "1234568"
+    assert pagerlog.capcode_text(45678) == "0045678"
+
+
+def test_a_page_with_no_message_says_so_rather_than_showing_nothing():
+    assert pagerlog.message_text(_page(kind="tone", text="")) == "Beep - no message"
+    assert pagerlog.message_text(_page(text="")) == "Empty message"
+    assert pagerlog.message_text(_page()) == "CALL SWITCHBOARD"
+
+
+def test_the_detail_line_reports_lost_codewords_only_when_there_are_some():
+    assert pagerlog.detail_text(_page()) == "1200 bps   alphanumeric"
+    assert "1 lost codeword" in pagerlog.detail_text(_page(errors=1))
+    assert "3 lost codewords" in pagerlog.detail_text(_page(errors=3))
+
+
+def test_the_status_line_distinguishes_a_quiet_channel_from_no_decoder():
+    assert pagerlog.status_text(None) == ""
+    assert pagerlog.status_text(PocsagState()) == "Listening"
+    heard = PocsagState(
+        pages=(_page(),), baud=1200, codewords_ok=48, codewords_bad=16, batches=4
+    )
+    assert pagerlog.status_text(heard) == "1200 bps   1 message   75% of codewords intact"
+
+
+# -- Favourites and recently played ----------------------------------------
+
+KUOW = 94_900_000
+KING = 98_100_000
+
+
+def test_a_favourite_and_a_recent_on_one_frequency_appear_once():
+    favourites = [Bookmark("KUOW", KUOW, favourite=True)]
+    recent = [
+        Station(frequency_hz=KUOW + 1_000, name="KUOW", last_heard=90.0),
+        Station(frequency_hz=KING, name="KING", last_heard=80.0),
+    ]
+    chips = quick_list(favourites, recent, now=100.0)
+    assert [c.frequency_hz for c in chips] == [KUOW, KING]
+    assert chips[0].favourite and not chips[1].favourite
+
+
+def test_favourites_are_never_crowded_out():
+    favourites = [
+        Bookmark(f"F{n}", 88_100_000 + n * 200_000, favourite=True) for n in range(9)
+    ]
+    recent = [Station(frequency_hz=KING, last_heard=10.0)]
+    chips = quick_list(favourites, recent, now=100.0, limit=4)
+    assert len(chips) == 9
+    assert all(chip.favourite for chip in chips)
+
+
+def test_the_strip_is_empty_before_anything_has_happened():
+    assert quick_list([], [], now=0.0) == []
+
+
+def test_wording():
+    assert ago(5) == "just now"
+    assert ago(600) == "10 minutes ago"
+    assert ago(3600) == "an hour ago"
+    assert ago(86_400) == "yesterday"
+    assert ago(3 * 86_400) == "3 days ago"
+    assert spent(30) == "30 seconds"
+    assert spent(600) == "10 minutes"
+    assert spent(3600) == "an hour"
+    assert spent(4 * 3600) == "4 hours"
+
+
+# -- The aircraft map ------------------------------------------------------
+
+# Somewhere over Seattle, which is where the real aircraft in this project's
+# notes were heard.
+HOME_LAT, HOME_LON = 47.60, -122.33
+
+
+def plane(lat=None, lon=None, icao=0xA1B2C3, **extra):
+    return Aircraft(
+        icao=icao, messages=10, age_s=1.0, latitude=lat, longitude=lon, **extra
+    )
+
+
+def test_nothing_to_frame_is_not_an_error():
+    """An aircraft is heard several times before it has sent a position."""
+    assert fit([], 800.0, 400.0) is None
+    assert fit([(HOME_LAT, HOME_LON)], 0.0, 400.0) is None
+
+
+def test_a_position_survives_the_round_trip():
+    """The projection is invertible, so a click on the map is a place."""
+    projection = fit([(HOME_LAT, HOME_LON), (47.8, -122.0)], 800.0, 400.0)
+    x, y = projection.to_pixel(47.7, -122.2)
+    lat, lon = projection.to_position(x, y)
+    assert lat == pytest.approx(47.7, abs=1e-9)
+    assert lon == pytest.approx(-122.2, abs=1e-9)
+
+
+def test_north_is_up_and_east_is_right():
+    """The sign test. Both errors draw a perfectly plausible map.
+
+    A flipped latitude puts every arrival where a departure should be, and
+    nothing else on the screen contradicts it.
+    """
+    projection = fit([(47.4, -122.6), (47.8, -122.0)], 800.0, 400.0)
+    centre = projection.to_pixel(HOME_LAT, -122.3)
+    north = projection.to_pixel(HOME_LAT + 0.1, -122.3)
+    east = projection.to_pixel(HOME_LAT, -122.2)
+    assert north[1] < centre[1]
+    assert east[0] > centre[0]
+
+
+def test_every_aircraft_lands_inside_the_window():
+    points = [(47.4, -122.7), (47.9, -121.9), (47.6, -122.3)]
+    projection = fit(points, 800.0, 400.0)
+    for lat, lon in points:
+        x, y = projection.to_pixel(lat, lon)
+        assert 0.0 <= x <= 800.0
+        assert 0.0 <= y <= 400.0
+
+
+def test_one_aircraft_does_not_zoom_to_absurdity():
+    """A single point has no extent, and a map fitted to it has no scale."""
+    projection = fit([(HOME_LAT, HOME_LON)], 800.0, 400.0)
+    assert projection.span_nm == pytest.approx(MIN_SPAN_NM)
+
+
+def test_longitude_is_squeezed_by_the_latitude():
+    """A degree of longitude is shorter than a degree of latitude up here.
+
+    Without the cosine the map is stretched east-west by half at this
+    latitude, which puts a north-south airway on screen as a diagonal.
+    """
+    projection = Projection(HOME_LAT, HOME_LON, 1000.0, 800.0, 400.0)
+    east = projection.to_pixel(HOME_LAT, HOME_LON + 1.0)[0] - 400.0
+    north = 200.0 - projection.to_pixel(HOME_LAT + 1.0, HOME_LON)[1]
+    assert east < north
+    assert east / north == pytest.approx(0.674, abs=0.01)
+
+
+def test_a_degree_of_latitude_is_sixty_nautical_miles():
+    """The definition, and the check that the units are what they claim."""
+    assert distance_nm(47.0, -122.0, 48.0, -122.0) == pytest.approx(60.0, abs=0.1)
+    assert distance_nm(47.0, -122.0, 47.0, -122.0) == 0.0
+
+
+def test_the_scale_bar_measures_what_it_says():
+    projection = fit([(47.4, -122.7), (47.9, -121.9)], 800.0, 400.0)
+    distance, pixels = scale_bar(projection)
+    # Whatever it says, that many pixels really is that far on this map.
+    start = projection.to_position(100.0, 200.0)
+    end = projection.to_position(100.0 + pixels, 200.0)
+    assert distance_nm(*start, *end) == pytest.approx(distance, rel=0.02)
+
+
+def test_round_numbers_are_round():
+    assert nice_number(37.0) == 20.0
+    assert nice_number(7.0) == 5.0
+    assert nice_number(1.4) == 1.0
+    assert nice_number(0.23) == 0.2
+    assert nice_number(0.0) == 1.0
+
+
+def test_the_graticule_gets_a_few_lines_at_any_zoom():
+    for points in (
+        [(47.5, -122.4), (47.7, -122.2)],
+        [(40.0, -130.0), (50.0, -110.0)],
+    ):
+        projection = fit(points, 800.0, 400.0)
+        step = graticule_step(projection)
+        span = projection.height / projection.scale
+        assert 2.0 <= span / step <= 12.0
+
+
+def test_degrees_are_labelled_with_a_hemisphere():
+    assert format_degrees(47.6, "lat") == "47.60°N"
+    assert format_degrees(-122.33, "lon") == "122.33°W"
+
+
+def test_altitude_is_a_colour_and_the_ground_is_its_own():
+    low = altitude_colour(2_000.0)
+    high = altitude_colour(38_000.0)
+    assert low.name() != high.name()
+    assert altitude_colour(0.0, on_ground=True).name() != low.name()
+    # Not knowing the altitude is not the same as being on the ground.
+    assert altitude_colour(None).name() != altitude_colour(0.0, True).name()
+
+
+def test_a_trail_grows_only_when_the_aircraft_moves():
+    """A position arrives twice a second; a trail of one place is not a trail."""
+    trails = {}
+    for _ in range(5):
+        update_trails(trails, [plane(47.6, -122.3)])
+    assert trails[0xA1B2C3] == [(47.6, -122.3)]
+    update_trails(trails, [plane(47.61, -122.3)])
+    assert len(trails[0xA1B2C3]) == 2
+
+
+def test_a_trail_is_capped():
+    trails = {}
+    for step in range(40):
+        update_trails(trails, [plane(47.6 + step * 0.01, -122.3)], limit=10)
+    assert len(trails[0xA1B2C3]) == 10
+    assert trails[0xA1B2C3][-1] == (pytest.approx(47.99), -122.3)
+
+
+def test_a_trail_goes_when_its_aircraft_does():
+    """Otherwise the map slowly fills with the paths of aircraft long gone."""
+    trails = {}
+    update_trails(trails, [plane(47.6, -122.3)])
+    update_trails(trails, [])
+    assert trails == {}
+
+
+def test_an_aircraft_with_no_position_has_no_trail():
+    trails = {}
+    update_trails(trails, [plane(callsign="ASA123")])
+    assert trails == {}

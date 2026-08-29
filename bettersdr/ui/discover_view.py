@@ -15,6 +15,8 @@ sample stream.
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtCore import Signal as QtSignal
 from PySide6.QtGui import QColor
@@ -32,14 +34,21 @@ from PySide6.QtWidgets import (
 
 from ..core.bookmarks import BookmarkStore, from_signal
 from ..core.engine import Engine, ScanUpdate
+from ..core.history import History
 from ..scan import bandplan
 from ..scan.classifier import Signal, format_frequency
 from ..scan.detector import SENSITIVITY_DB
 from .levels import Level
 from .widgets.icons import glyph
+from .widgets.quicktune import QuickTune, quick_list
 from .widgets.signalcard import SignalCard
 
 REFRESH_HZ = 20
+# The quick-tune strip changes a few times an hour, so it is rebuilt about
+# once a second rather than on every frame - and, unlike everything else on
+# this screen, before the early return, because it has nothing to do with
+# whether a sweep is running.
+QUICK_TICKS = REFRESH_HZ
 
 # Three positions, worded as what they do rather than as decibels. The dB
 # value only appears at Expert, where it means something to the reader.
@@ -87,23 +96,31 @@ class DiscoverView(QWidget):
     """Sweep a band and list what is transmitting in it."""
 
     listenRequested = QtSignal(object)
+    # A chip on the quick-tune strip. Separate from `listenRequested`, which
+    # carries a classified `Signal` the sweep just measured - a favourite
+    # carries what the user saved, and the two must not be confused for one
+    # another on the way out of this screen.
+    tuneRequested = QtSignal(object)
 
     def __init__(
         self,
         engine: Engine,
         level: Level = Level.SIMPLE,
         bookmarks: BookmarkStore | None = None,
+        history: History | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.engine = engine
         self.level = level
         self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore()
+        self.history = history if history is not None else History()
         self._levelled: list[tuple[QWidget, Level]] = []
         self._cards: list[SignalCard] = []
         self._shown: tuple[tuple[float, str], ...] = ()
         self._band: bandplan.Band | None = None
         self._running = False
+        self._ticks = 0
 
         self._build()
         self.set_level(level)
@@ -130,6 +147,14 @@ class DiscoverView(QWidget):
         )
         subheading.setObjectName("subheading")
         outer.addWidget(subheading)
+
+        # Above the band chips, because on the second run of the app this is
+        # the shorter route to hearing something than any sweep is. It hides
+        # itself on a first run, so a new user sees exactly the screen they
+        # saw before this existed.
+        self.quick = QuickTune()
+        self.quick.tuneRequested.connect(self.tuneRequested.emit)
+        outer.addWidget(self.quick)
 
         outer.addLayout(self._band_chips())
         outer.addLayout(self._actions())
@@ -252,10 +277,23 @@ class DiscoverView(QWidget):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        # Immediately, not on the next slow tick: this screen is arrived at
+        # straight from the listening screen, and a strip that took a second
+        # to notice the station just left would be visibly stale.
+        self._refresh_quick()
         self._timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+
+    # -- favourites and recently played ------------------------------------
+
+    def _refresh_quick(self) -> None:
+        self.quick.show_entries(
+            quick_list(
+                self.bookmarks.favourites, self.history.recent(), time.time()
+            )
+        )
 
     # -- scanning ----------------------------------------------------------
 
@@ -287,6 +325,9 @@ class DiscoverView(QWidget):
         )
 
     def _tick(self) -> None:
+        self._ticks += 1
+        if self._ticks % QUICK_TICKS == 0:
+            self._refresh_quick()
         update = self.engine.scan_update()
         if update is None:
             return

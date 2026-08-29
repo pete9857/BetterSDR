@@ -21,7 +21,7 @@ Full roadmap and phase breakdown: **[docs/PLAN.md](docs/PLAN.md)**.
 | **1 — Listen** (demod, audio, spectrum/waterfall) | **Complete and verified on hardware** |
 | **2 — Discovery** (sweep, detect, classify) | **Complete and verified on hardware** |
 | **3 — SDR# parity** | **Complete and verified on hardware** (small gaps and untested paths listed in docs/PLAN.md) |
-| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo, ADS-B and HD Radio complete and verified on hardware** (HD Radio: engine, UI and seven local stations, 2026-08-28); POCSAG not started |
+| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo, ADS-B and HD Radio complete and verified on hardware** (HD Radio: engine, UI and seven local stations, 2026-08-28). **POCSAG complete and tested against synthetic transmissions, not yet heard off air** (2026-08-29). **Favourites, recently played and session history complete** (2026-08-29). **Stereo blend complete** (2026-08-29, not yet heard on a fringe station). **Aircraft map complete and seen with real aircraft** (2026-08-29), with a bundled Natural Earth basemap |
 | **5 — Packaging** | Not started |
 
 ### Driver state on this machine
@@ -317,6 +317,74 @@ substations don't show them, like 103.7". Not acted on beyond the note.
   its `name` field is a real name where the type is `None`. Untested as a
   fallback because no local station was found where SIS and SIG disagree; SIG
   also arrives once and late (45-75 s) against SIS's few seconds.
+
+## POCSAG facts
+
+Measured on this machine on 2026-08-29, against synthetic pager
+transmissions. Same rule as the other fact sections: don't re-derive them.
+The decoder ships but has **not yet been run against a real transmitter** —
+see the note at the end. Full reasoning in **Amendment 11** of docs/PLAN.md.
+
+- **POCSAG *is* the deviation, so the tap is the discriminator output and
+  there is no filter in front of the slicer.** The running sum across one
+  bit period is the matched filter for a rectangular symbol, and the bit
+  value is the difference of that sum at two fractional positions — the
+  same `np.interp` trick as RDS and ADS-B, including the `+ 0.5` that
+  corrects the running sum's half-sample bias. There is no whole number of
+  samples per bit at any rate the radio produces: 512 bps at a 96 kHz IF is
+  187.5.
+- **All three baud rates run at once rather than one being detected.**
+  Detecting from the preamble throws away every transmission whose preamble
+  was missed, which is precisely the one a user tuning across the band
+  arrives in the middle of. Three vectorised passes cost 1.3% of a core
+  between them.
+- **Frame sync is stateless: the sync codeword is searched for everywhere.**
+  A batch is 544 bits and every one opens with the same 32-bit codeword, so
+  a lock buys nothing and would need a recovery path of its own. Allowing
+  two bit errors in the match, a false hit turns up once in eight million
+  bit positions — an hour of a 2400 bps channel — and the sixteen codewords
+  behind it still have to pass their own checkwords.
+- **A message that fills its last batch exactly has nothing to end it.** A
+  page is terminated by an idle codeword or by the next address codeword,
+  and a transmitter stopping on a batch boundary sends neither. The
+  staleness rule is expressed in *bits* and cannot be shorter than one
+  batch, because a batch's worth of bits is exactly how long it takes to
+  know that a batch which would have been adjacent is not there.
+- **One bit of error correction, not two.** BCH(31,21) can correct two, and
+  most pager decoders do — but three errors can then land within two of the
+  *wrong* codeword, and a mis-corrected address codeword is somebody's
+  message shown against somebody else's pager number. Correcting one needs
+  five to go wrong the same way.
+- **The bottom three bits of a capcode are never transmitted.** They are
+  which of the eight frames of the batch the address codeword sat in, which
+  is how a pager sleeps through seven eighths of the traffic. Ignore it and
+  every capcode is wrong by up to seven and looks almost right.
+- **Three orderings run against the obvious reading, and all three produce
+  output rather than an error.** The deviation's polarity is not fixed, so
+  the sync codeword is matched against its inverse as well and the batch
+  behind an inverted match is inverted before being read. Alphanumeric
+  characters arrive seven bits at a time, least significant bit first,
+  packed across codeword boundaries. Numeric digits arrive four bits at a
+  time, least significant bit first — so the character table is indexed by
+  the nibble as transmitted, with the reversal baked in.
+- **RDS and POCSAG want the same tap and must not share one slot.** Their
+  attach conditions are mutually exclusive — 200 kHz broadcast against a
+  12.5 kHz two-way channel — so one slot would work until the day it
+  didn't, and the failure it produces is a feature that silently stopped
+  working. `_FmBase.data_sink` is separate from `mpx_sink` for that reason
+  and no other.
+- **Cost, per second of radio:** 12.0 ms with traffic and 13.6 ms on noise
+  at a 96 kHz IF, 12.9 / 13.6 ms at 240 kHz. 1.2–1.4% of a core either way,
+  against RDS's 2.4%. It is dearer on noise than on traffic because the
+  expensive part is the three timing loops, which run whatever is there.
+- **Not yet heard off air.** Twenty-eight tests cover all three rates, six
+  arrival phases, inverted deviation, a quarter of full deviation of tuning
+  error, 100 ppm of clock error, noise, four block sizes and the whole path
+  through the NFM demodulator at 2.4 MS/s — and none of that is a real
+  transmitter. ADS-B was in exactly this position on 2026-08-27 and its
+  surface-versus-airborne CPR fault was invisible to every synthetic test.
+  The check is one line: tune to a busy channel in 929–932 MHz and watch
+  the panel.
 
 ## HF and sample-rate facts
 
@@ -685,6 +753,46 @@ don't re-derive them. Full reasoning in **Amendment 8** of docs/PLAN.md.
 - **The whole decoder costs 2.0% of a core** (20 ms per second of radio at
   2.4 MS/s, against the demodulator's 63 ms), and is on by default.
 
+Measured on 2026-08-29, adding the blend. Same rule.
+
+- **The difference channel is 15.4 dB noisier than the sum, at every signal
+  level that decodes at all.** FM noise rises as the square of the audio
+  frequency and L-R sits at 23-53 kHz, so the penalty is a property of the
+  band rather than of the station: measured through the real demodulator it
+  was 15.2-15.5 dB from a clean carrier all the way down to the FM
+  threshold. That is why a fringe station is *louder* in stereo and why the
+  fade is worth having; it is also why the blend cannot be decided by
+  comparing the two channels' noise, which always gives the same answer.
+- **The pilot margin is a usable proxy for it, and the guard band is what
+  makes it one.** Pilot-to-guard tracked the carrier-to-noise ratio within a
+  couple of dB over a 27 dB sweep, because a 10% pilot is a fixed reference
+  and the guard band immediately below it is the noise the difference
+  channel is about to be built from. `BLEND_FULL_DB` 20 and `BLEND_MONO_DB`
+  11 come from that sweep: at 20 dB of margin the difference channel carries
+  ~12 dB of signal-to-noise, and by 11 dB it carries none.
+- **Asymmetric smoothing on a noisy estimate biases the answer, and this was
+  the bug.** The first version rode the margin down fast and back slowly -
+  the audio AGC's asymmetry, which is right there and wrong here. A per-block
+  margin swings several dB whatever the signal, so a fast fall parks the
+  blend at the dips: a clean synthetic broadcast measured **blend 0.70 and
+  12 dB of separation** when it should have measured 1.00 and 33 dB.
+  Averaging the two powers symmetrically over `MARGIN_TAU_S` first, and
+  reading the blend straight off the smoothed margin, gives 1.00 and 33.7 dB.
+  A real collapse does not need the fast path anyway: the lock's own
+  hysteresis drops the difference channel outright.
+- **A weight that steps between blocks is a click, once per block.** The
+  weight is a ramp across the block from the previous value to the new one,
+  and it short-circuits to the scalar 1.0 when both ends are 1.0 - which is
+  every block of a strong station, so the blend costs nothing where it is not
+  wanted. Blending measured **1.5 ms per second of radio** on top of the
+  decoder's 13.5.
+- **Fully blended has to be reported as mono.** At blend 0 the two channels
+  are identical, and a lit STEREO badge over them is the receiver claiming
+  something it is not doing - so the difference is returned as `None`, the
+  same answer as no pilot at all, and the audio goes back to one channel.
+  The station is still *locked*; that is a different question and it stays
+  answered honestly in `pilot_db`.
+
 ## ADS-B facts
 
 Measured on this machine on 2026-08-28, against synthetic Mode S bursts. Same
@@ -768,6 +876,128 @@ has **not yet been run against real aircraft** - see the note at the end.
   30 dB apart, on the same aerial, minutes apart - the clearest measurement yet
   of why gain belongs to the band rather than to the session.
 
+Measured on 2026-08-29, adding the map. Same rule.
+
+- **The receiver does not know where it is, and nothing in ADS-B tells it.**
+  So there is no home position to draw range rings from and no natural
+  centre. The map frames itself on the aircraft it has heard and states the
+  scale in nautical miles - which needs no configuration and is honest,
+  where a map centred on a guess would not be. A home position remains the
+  obvious next addition, and would improve `_cpr_local` as well as the
+  picture. What the coastline does instead is make that self-made frame
+  *legible*: the difference between six dots in a rectangle and six aircraft
+  over a city you recognise.
+- **A single aircraft has no extent, so a map fitted to it has no scale.**
+  Fitting to the bounding box works for two or more and divides by
+  approximately zero for one; `MIN_SPAN_NM` is the floor, and 6 nm across is
+  about what a receiver hears when only one aircraft is in range.
+- **The projection has to be invertible, which rules out fitting by pixels
+  alone.** Equirectangular about the centre of the view, with longitude
+  squeezed by the cosine of the centre latitude: at Seattle's 47.6 degrees
+  that squeeze is 0.674, and without it a north-south airway is drawn as a
+  diagonal.
+- **The trail must grow on a move, not on a frame.** An aircraft reports
+  twice a second and the screen refreshes five times a second, so appending
+  per frame is a list that grows without bound and draws a single point.
+  `update_trails` is a plain function for the same reason the colour maps
+  are: what it does wrong looks entirely normal for the first minute.
+- **The whole United States is 95,000 points, and that is the surprise.**
+  Natural Earth 1:10m clipped to the region is 56,633 points of land,
+  27,473 of lakes and 11,029 of state boundary. Delta-encoded along each
+  line as int16 steps on an 11 m grid and zlib'd, that is **353 KB
+  including 4,967 places** - a third of the driver DLLs already committed,
+  and 5% of the bundled nrsc5 binary. Size was never the reason not to have
+  a basemap.
+- **Steps, not positions, and int16 rather than varints.** Deltas make the
+  high bytes almost all zero, which is what compresses; int16 costs 11 KB
+  more than varints (226 against 215) and decodes as `frombuffer` plus one
+  `cumsum` per line instead of a bit-unpacking loop. **31 ms to load the
+  lot.** A simplified border can be a single segment several degrees long,
+  which overflows an int16, so the build puts points back into those - one
+  check, and without it the decoder cannot stay a `cumsum`.
+- **Natural Earth, not OpenStreetMap, and the reason is licensing.** OSM is
+  ODbL: attribution on the map and share-alike on a derived database.
+  Natural Earth is public domain with no permission needed. This project
+  already has one licensing boundary it has to be careful about; this is the
+  version of that question that can simply be avoided.
+- **Caching the *culled* arrays is what makes the land free, and the obvious
+  optimisation is the slow one.** Building one path per layer in degrees and
+  handing Qt an affine transform sounds better - build once, transform per
+  frame - and measured **26 ms a frame** against 8, because Qt then walks
+  and clips the whole country's path every time. Culling by bounding box in
+  Python and rebuilding the path each frame wins; caching the flattened
+  result against a window rounded *outwards* to 0.05 degrees means the frame
+  moving costs nothing at all. Path building is **0.17 ms**.
+- **Antialiasing is 3 of the 4.3 ms the land costs**, at the widest view,
+  and on the *stroke* it is worth it: 5 Hz makes that 2% of a core, and a
+  jagged coastline on a dark background is exactly the kind of cheap-looking
+  detail this screen cannot afford. On the **fill** it has to be off - see
+  the tiling note below.
+- **Visiting points from Python is 11.6 ms a frame against 0.6.**
+  `pyqtgraph.functions.arrayToQPath` builds a `QPainterPath` in C++ straight
+  from numpy arrays, with a `connect` array of zeros marking where one line
+  ends - without which the map is one continuous stroke from Puget Sound to
+  the Florida Keys. pyqtgraph is already a dependency for the spectrum.
+Measured on 2026-08-29, giving the map land and water instead of an
+outline, and places down to the size of a suburb. Same rule.
+
+- **A fill needs closed rings, so the source layer changes and the coastline
+  stops being a layer at all.** `ne_10m_land` clipped to a box is part real
+  shoreline and part straight lines along the box, and stroking those draws
+  a coastline across the middle of Manitoba. One bit per point says which -
+  **6 KB for the whole country** - and it is exactly the `connect` array
+  `arrayToQPath` already takes, so the same geometry is filled whole and
+  stroked in pieces. Keeping `ne_10m_coastline` as a second layer instead
+  would have cost 135 KB *and* let the fill edge drift up to 33 m from the
+  shoreline drawn on it, because the two would be simplified from
+  differently-cut inputs.
+- **Simplification has to stop at every run boundary.** Douglas-Peucker over
+  a whole ring moves points across the join between real coast and a
+  clipper's edge, and the bit that said which is which is then describing a
+  different step. Each run is simplified alone, which also preserves the
+  closure for free.
+- **One ring of 18,283 points is what makes culling useless.** North America
+  is a single ring, so every window that touches it draws the whole
+  continent to show Puget Sound: **17 ms a frame** at a 69 nm view, against
+  8 for the old outline. Clipping to a 5-degree grid instead of to the four
+  region boxes makes it 910 rings of a few hundred, the bounding-box test
+  starts working again, and the same frame costs **6.7 ms**. The tile edges
+  add 1,000 points and 6 KB.
+- **Two antialiased fills that abut leave a hairline of the background
+  showing.** Each covers about half of the boundary pixel and the two
+  half-covers do not add up to one. So the land is filled with antialiasing
+  *off* - a hard edge has no seam - and the shoreline is stroked over it
+  with antialiasing on, which is the only edge anybody looks at. This is a
+  consequence of tiling, not a preference.
+- **The north edge of the region is now visible, because it is a fill.** A
+  coastline that stopped at 49.6 degrees just went missing; a fill that
+  stops there draws southern British Columbia as ocean. The boxes reach 53
+  degrees now, and they must not overlap - two clipped copies of one island
+  in an odd-even path cancel and leave a hole.
+- **Natural Earth has Seattle and does not have Bothell.** Its populated
+  places is 482 US entries and stops above the size of a suburb, and
+  lowering the population threshold finds nothing because the places are
+  not in the file. The Census gazetteer has all 32,329 incorporated places
+  and CDPs with positions but no population; `sub-est` has the populations
+  keyed by the state and place FIPS codes the gazetteer concatenates into
+  GEOID. Joined, above 5,000 people, that is **4,871 places** - Kent,
+  Renton, Bothell, Woodinville - for 50 KB. Natural Earth still supplies
+  everything outside the country, which is Vancouver and Tijuana.
+- **Both Census files are public domain**, as works of the US government, so
+  this changes nothing about the licensing argument that chose Natural Earth
+  over OSM.
+- **Sorting places by population at build time is what makes the query
+  cheap**, and the list is now ten times longer: `visible_cities` takes the
+  first N of a masked comparison over two parallel arrays - **0.07 ms** -
+  rather than walking five thousand dataclasses. Drawn at two sizes rather
+  than on a ramp: over a range from New York to a town of five thousand a
+  continuous scale is either invisible at one end or a blob at the other.
+- **Longitude labels collide where latitude labels do not.** The graticule
+  is square in degrees, so its vertical lines are 1/cos(lat) closer together
+  in pixels than its horizontal ones - 1.5x at this latitude - and a spacing
+  that reads comfortably down the side is a solid row of overlapping text
+  along the bottom. The lines are all drawn; only the labels are thinned.
+
 Wiring it into the app produced three findings of its own, all of the same
 shape: aircraft tracking is the first feature that *borrows* the radio.
 
@@ -811,7 +1041,10 @@ bettersdr/
     frontend.py   gain selection, safe_sample_rate, safe_center_hz
     engine.py     the DSP thread, device ownership, single-slot mailbox
     settings.py   persisted preferences, atomic JSON, defaults on any fault
-    bookmarks.py  named frequencies with groups and CSV exchange (no Qt)
+    bookmarks.py  named frequencies with groups, favourites and CSV
+                  exchange (no Qt)
+    history.py    what was actually listened to: a dwell gate, the recent
+                  list, and this session's trail behind the Back button
     calibrate.py  ppm measurement against a known carrier
   dsp/
     convert.py    uint8 -> complex64 LUT
@@ -823,7 +1056,8 @@ bettersdr/
     agc.py        audio AGC: threshold, slope, hang, separate ramps
     denoise.py    noise blanker (impulses) + spectral subtraction (hiss)
     correct.py    DC removal, IQ imbalance, swap I/Q, offset tuning
-    stereo.py     the 19 kHz pilot and the 38 kHz L-R subcarrier
+    stereo.py     the 19 kHz pilot, the 38 kHz L-R subcarrier, and the
+                  fade to mono when the station cannot carry it
     chain.py      FrontEnd and AudioChain: the optional stages either side
                   of the demodulator
   scan/
@@ -839,9 +1073,12 @@ bettersdr/
                   positions and the aircraft list
     hdradio.py    the bundled nrsc5 child process: cu8 down its stdin,
                   44.1 kHz audio up its stdout, station metadata off its
-                  stderr (pocsag still to come)
+                  stderr.
                   Engine.set_hd borrows the window for it; core/reader.py
                   streams gaplessly for as long as it holds the radio
+    pocsag.py     pager text off a two-way FM channel: an interpolating bit
+                  clock at 512/1200/2400 bps at once, stateless frame sync,
+                  BCH(31,21), capcodes and both readings of the message
 vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
                   bundled and spoken to over pipes, never linked
   audio/
@@ -850,14 +1087,22 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
   ui/
     app shell     main_window.py, levels.py, listen_view.py, discover_view.py,
                   aircraft_view.py
+    basemap/      us.bsm + loader: the land, lakes, state lines and places
+                  the aircraft map draws on - filled areas, not an outline.
+                  Data, like the band plan; a second region is a second file
     freq_manager.py  the bookmark window
     widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
                   colormaps.py, axes.py, signalcard.py, aircraftcard.py,
-                  icons.py, panel.py (the sectioned, level-gated control
-                  column)
+                  planemap.py, pagerlog.py, quicktune.py, icons.py,
+                  panel.py (the sectioned, level-gated control column)
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
+tools/
+  build_basemap.py  compiles ui/basemap/us.bsm from Natural Earth and the
+                  US Census. Run by hand; its output is committed, so nothing
+                  at runtime parses a shapefile or downloads anything
 tests/
   synth.py        synthetic IQ generator — most tests need no hardware
+  synth_adsb.py   Mode S bursts; synth_pocsag.py  pager transmissions
 ```
 
 ### Threading model
@@ -946,6 +1191,12 @@ Device control calls are serialised through a command queue consumed by the read
   derives **one** from all the channels and applies it to all of them, or
   else mixes down and says so. Independent per-channel control is a stereo
   image that wanders, which is a stranger fault than any level error.
+- **A decoder that taps the demodulator gets a slot of its own.** RDS and
+  POCSAG both want the point between the discriminator and the de-emphasis,
+  and their attach conditions happen to be mutually exclusive — so one
+  shared slot would work right up until it didn't, and the failure would be
+  a feature that silently stopped working. `mpx_sink` and `data_sink` are
+  separate for that reason and no other.
 - **The audio chain owns the end of the path, not the demodulator.** Volume
   and the final limiter come after the AGC, so a gain rider has the full range
   to work with and the volume slider still does something when it is on. Every
@@ -958,12 +1209,33 @@ Device control calls are serialised through a command queue consumed by the read
   back from.** The bias tee asks first and is never restored from settings; the
   window width is clamped by `safe_sample_rate` whatever is remembered; a
   corrupt settings file is replaced by defaults rather than reported.
+- **Nothing is fetched while the app is running; what it needs, it carries.**
+  The aircraft map has a basemap and it is 350 KB of public-domain vectors
+  compiled into the package, not tiles - because a tile is a network request,
+  a service that can go away and an attribution obligation, in an application
+  whose whole claim is that it works off a dongle and a laptop. Same bargain
+  as `drivers/win-x64/`: pay the size once so the running program depends on
+  nothing it cannot see. `tools/build_basemap.py` is the build-time half and
+  is not in anybody's dependency tree.
 - **A measurement that cannot be trusted is not reported.** The calibration
   assistant refuses rather than returning a confident number derived from a
   wandering reference - same principle as the classifier's "Unknown signal".
 - **Recording is written from the ring, not from the audio path.** The clock
   drift correction resamples by up to 0.5%, which is right for listening and
   wrong for anything anybody might later measure.
+- **Tuning across a band is not listening to it.** `core/history.py` records a
+  frequency only after `DWELL_SECONDS` on it, because the digit tuner emits one
+  frequency per keystroke and click-to-tune emits one per click - the same
+  argument as the scanner's persistence gate. The threshold has a floor that is
+  not arbitrary: it must be longer than the few seconds RDS and HD Radio take
+  to name a station, or every entry would be promoted before anything could
+  name it and the list would be bare frequencies. A name therefore arrives
+  through `name()` afterwards, never as an argument to `tune()`.
+- **Listening time is accrued from the view's own timer, not read off the
+  clock.** A page that is not showing does not tick, so a station left playing
+  behind the Discover screen accrues nothing - which is the honest reading of
+  "played". `MAX_TICK_SECONDS` is what stops a minimised window coming back and
+  claiming the hour.
 - Line length 90, ruff with `E,F,I,UP,B,SIM`. Keep `ruff check .` clean.
 
 ## Git

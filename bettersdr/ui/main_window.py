@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from ..core import doctor
 from ..core.bookmarks import BookmarkStore
 from ..core.engine import Engine
+from ..core.history import History
 from ..core.settings import Settings
 from ..scan.classifier import Signal
 from .aircraft_view import AircraftView
@@ -84,6 +85,7 @@ class MainWindow(QMainWindow):
         level: Level = Level.STANDARD,
         settings: Settings | None = None,
         bookmarks: BookmarkStore | None = None,
+        history: History | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("BetterSDR")
@@ -95,6 +97,11 @@ class MainWindow(QMainWindow):
         # result and one saved while listening land in the same list and the
         # star on either screen agrees with the other.
         self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore.open()
+        # One history, for the same reason there is one bookmark store: the
+        # listening screen writes it and the Discover strip reads it, and two
+        # copies would have the strip showing a station the radio left
+        # minutes ago.
+        self.history = history if history is not None else History.open()
         self.view: ListenView | None = None
         self.discover: DiscoverView | None = None
         self.aircraft: AircraftView | None = None
@@ -121,16 +128,21 @@ class MainWindow(QMainWindow):
             # shown a list of what is actually out there is the entire
             # argument this one is making.
             self.discover = DiscoverView(
-                engine, level=level, bookmarks=self.bookmarks
+                engine,
+                level=level,
+                bookmarks=self.bookmarks,
+                history=self.history,
             )
             self.view = ListenView(
                 engine,
                 level=level,
                 settings=settings,
                 bookmarks=self.bookmarks,
+                history=self.history,
             )
             self.aircraft = AircraftView(engine, level=level)
             self.discover.listenRequested.connect(self._listen_to)
+            self.discover.tuneRequested.connect(self._tune_to)
             self._stack = QStackedWidget()
             self._stack.addWidget(self.discover)
             self._stack.addWidget(self.view)
@@ -261,6 +273,22 @@ class MainWindow(QMainWindow):
         self._show_page(1)
         self.view.show_signal(signal)
 
+    def _tune_to(self, entry) -> None:
+        """Somebody pressed a favourite or a recently played chip.
+
+        The same order as `_listen_to` and for the same reason: showing the
+        page runs the view's own start-up, which would otherwise overwrite
+        the mode the chip carried with the band plan's.
+        """
+        if self.view is None:
+            return
+        if self.engine is not None and self.engine.scanning:
+            self.engine.stop_scan()
+        self._show_page(1)
+        self.view.tune_to(
+            int(entry.frequency_hz), entry.mode, float(entry.bandwidth_hz)
+        )
+
     def _show_status(self) -> None:
         if self.engine is None:
             self.statusBar().showMessage("No radio connected")
@@ -300,6 +328,11 @@ class MainWindow(QMainWindow):
         if self.view is not None:
             self.view.remember()
         self.bookmarks.save()
+        # `leave` before `save`: the visit in progress is worth counting, and
+        # the whole point of the recent list is to have last night's station
+        # on the landing screen tomorrow morning.
+        self.history.leave()
+        self.history.save()
         if self.engine is not None:
             # Stops the radio *and* closes any recording with a valid header.
             self.engine.stop()

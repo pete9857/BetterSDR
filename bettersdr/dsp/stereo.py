@@ -53,6 +53,36 @@ PILOT_TAPS = 288
 # edge of reception flickering the indicator.
 LOCK_DB = 9.0
 UNLOCK_DB = 6.0
+# Where the difference channel stops being worth the noise it brings with it.
+# FM noise rises as the square of the audio frequency, so the 23-53 kHz the
+# difference channel occupies is far noisier than the 0-15 kHz the sum sits
+# in: measured through the real demodulator at 15.4 dB, and near enough
+# constant at every signal level that decodes at all. That penalty is
+# inaudible on a strong station and is the entire sound of a weak one.
+#
+# So the difference is faded rather than switched off - full weight at
+# BLEND_FULL_DB of pilot margin, none at BLEND_MONO_DB, a straight line
+# between. Both numbers come from a sweep of a synthetic broadcast through
+# the real demodulator: at 20 dB of margin the difference channel is carrying
+# about 12 dB of signal-to-noise and is still worth having, and by 11 dB it
+# is carrying none at all, the carrier being at the FM threshold by then.
+BLEND_FULL_DB = 20.0
+BLEND_MONO_DB = 11.0
+# How long the margin the blend reads is averaged over. A single block's
+# measurement swings several dB whatever the signal - the same effect that
+# makes a per-bin flatness reading meaningless - and a blend that followed it
+# would spend its time at the dips. Symmetric on purpose: any asymmetry on a
+# noisy estimate biases it towards whichever direction is faster, which for a
+# fast fall means a strong station quietly playing at half separation.
+#
+# A genuine collapse does not need this to be fast. The lock has its own
+# hysteresis and drops the difference channel outright, which is the honest
+# answer to a signal that has gone away.
+MARGIN_TAU_S = 0.5
+# Below this the difference channel is not contributing anything anybody
+# could hear, so the receiver says mono rather than lighting a badge over two
+# channels that are identical.
+BLEND_MONO_FLOOR = 0.02
 # How fast the pilot amplitude estimate follows, as a time constant. The pilot
 # is a constant-amplitude tone, so this only has to track fading; making it
 # fast would let noise on the pilot modulate the separation.
@@ -81,9 +111,20 @@ class StereoDecoder:
             )
         self.sample_rate = float(sample_rate)
         self.enabled = True
+        # Whether to fade the difference channel out as the station weakens.
+        # Separate from `enabled` because they answer different questions:
+        # one is whether to decode stereo at all, the other is what to do
+        # when decoding it costs more noise than it is worth.
+        self.blend_enabled = True
         # What the last block measured, for the indicator and for the log.
         self.pilot_db = -60.0
         self.locked = False
+        # How much of the difference channel is currently being used, 0 to 1.
+        self.blend = 1.0
+        # The pilot margin the blend reads: the same ratio as `pilot_db` but
+        # averaged over `MARGIN_TAU_S`. `pilot_db` stays instantaneous
+        # because the lock wants to hear a station arrive.
+        self.margin_db = 0.0
 
         self._pilot = FirDecimator.bandpass(
             1,
@@ -103,6 +144,8 @@ class StereoDecoder:
         # there is no half-sample skew to explain away later.
         self.delay = (self._pilot.taps.size - 1) // 2
         self._level = 0.0
+        self._slow_pilot = 0.0
+        self._guard_level = 0.0
         self._history = np.zeros(self.delay, dtype=np.float32)
 
     # -- lifecycle ---------------------------------------------------------
@@ -114,6 +157,10 @@ class StereoDecoder:
         self._level = 0.0
         self.locked = False
         self.pilot_db = -60.0
+        self.blend = 1.0
+        self.margin_db = 0.0
+        self._slow_pilot = 0.0
+        self._guard_level = 0.0
 
     # -- streaming ---------------------------------------------------------
 
@@ -139,6 +186,9 @@ class StereoDecoder:
         self._track(pilot, self._guard.process(mpx))
         if not (self.locked and self.enabled):
             return delayed, None
+        weight = self._weights(mpx.size)
+        if weight is None:
+            return delayed, None
 
         # `pilot` is analytic, so squaring doubles its frequency: the 19 kHz
         # tone becomes the 38 kHz subcarrier the transmitter suppressed, with
@@ -155,7 +205,32 @@ class StereoDecoder:
         reference = -2.0 * pilot.real * pilot.imag / max(self._level, 1e-12)
         # Twice, because a product detector recovers half the amplitude of a
         # suppressed-carrier signal - the same factor single sideband needs.
-        return delayed, (2.0 * delayed * reference).astype(np.float32)
+        side = 2.0 * delayed * reference
+        return delayed, (side * weight).astype(np.float32)
+
+    def _weights(self, count: int) -> np.ndarray | float | None:
+        """How much of the difference channel this block should carry.
+
+        A ramp across the block rather than one number for it, because the
+        weight moves between blocks and a step in a gain is a click. `None`
+        means the station has been blended all the way to mono, which is
+        reported as mono rather than as stereo with nothing in it.
+        """
+        target = 1.0
+        if self.blend_enabled:
+            span = BLEND_FULL_DB - BLEND_MONO_DB
+            target = min(1.0, max(0.0, (self.margin_db - BLEND_MONO_DB) / span))
+        previous = self.blend
+        self.blend = target
+        if max(previous, target) < BLEND_MONO_FLOOR:
+            return None
+        if previous == 1.0 and target == 1.0:
+            # The overwhelming case on a strong station, and the one that has
+            # to cost nothing: no array, no multiply of a whole block by ones.
+            return 1.0
+        return np.linspace(
+            previous, target, count, endpoint=False, dtype=np.float32
+        )
 
     def _track(self, pilot: np.ndarray, guard: np.ndarray) -> None:
         """Follow the pilot's amplitude, and decide whether it is really there."""
@@ -175,8 +250,24 @@ class StereoDecoder:
         else:
             self._level += alpha * (pilot_power - self._level)
 
+        # The same two powers again, averaged for longer, which is what the
+        # blend reads. Seeded rather than started at zero, so the first block
+        # of a station is already the right answer for it.
+        slow = 1.0 - np.exp(-pilot.size / (self.sample_rate * MARGIN_TAU_S))
+        if self._guard_level == 0.0:
+            self._slow_pilot, self._guard_level = pilot_power, guard_power
+        else:
+            self._slow_pilot += slow * (pilot_power - self._slow_pilot)
+            self._guard_level += slow * (guard_power - self._guard_level)
+        self.margin_db = 10.0 * np.log10(
+            max(self._slow_pilot, 1e-20) / max(self._guard_level, 1e-20)
+        )
+
 
 __all__ = [
+    "BLEND_FULL_DB",
+    "BLEND_MONO_DB",
+    "BLEND_MONO_FLOOR",
     "GUARD_CENTRE_HZ",
     "LOCK_DB",
     "MIN_MPX_RATE_HZ",

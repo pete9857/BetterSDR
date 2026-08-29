@@ -220,6 +220,14 @@ class _FmBase(Demodulator):
         # A passive listener on the composite baseband - the RDS receiver.
         # It reads; it does not change what is heard.
         self.mpx_sink: object | None = None
+        # The same again for the pager decoder, which reads the deviation
+        # itself rather than a subcarrier riding on it. It gets a slot of its
+        # own rather than sharing this one: RDS lives on a 200 kHz broadcast
+        # channel and POCSAG on a 12.5 kHz two-way channel, so the two are
+        # never wanted at once - but one slot would mean whichever attached
+        # last silently evicted the other, which is exactly the kind of fault
+        # that only shows up as a feature that stopped working.
+        self.data_sink: object | None = None
         # A `dsp.stereo.StereoDecoder`, when the engine has attached one. This
         # one is not passive: it hands back a delayed sum along with the
         # difference, because the delay that aligns the multiplex with its own
@@ -262,6 +270,12 @@ class _FmBase(Demodulator):
             # station puts up there - the stereo difference channel at 38 kHz
             # and RDS at 57 kHz. This is the only place they exist.
             self.mpx_sink.process(audio)
+        if self.data_sink is not None:
+            # The deviation itself, which is what an FSK decoder slices. The
+            # audio filter below rounds the corners off the bits and a squelch
+            # would mute them outright, so this is the last point at which
+            # they are still square.
+            self.data_sink.process(audio)
         side = None
         if self.stereo is not None:
             audio, side = self.stereo.process(audio)

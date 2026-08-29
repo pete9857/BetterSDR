@@ -67,7 +67,16 @@ DEFAULTS: dict[str, Any] = {
     # default is on; it is remembered because somebody who turned it
     # off did so for a reason.
     "rds": True,
+    # The same bargain on a two-way channel: 1.3% of a core, and it only
+    # attaches on a channel narrow enough to be a pager one in the first
+    # place. Somebody who tunes across a paging transmitter has no way of
+    # knowing there was a switch to go and find.
+    "pocsag": True,
     "stereo": True,
+    # Fading a fringe station towards mono is a judgement about how
+    # much hiss is worth how much separation, so it is remembered
+    # separately from whether stereo is decoded at all.
+    "stereo_blend": True,
     # Off by default: an HD session takes a few seconds to find the digital
     # signal, and a first-time user pressing play should hear something
     # immediately. Remembered because somebody who turned it on wants it on

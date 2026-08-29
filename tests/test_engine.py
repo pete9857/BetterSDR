@@ -471,6 +471,50 @@ def test_rds_can_be_switched_off():
     assert engine._demod.mpx_sink is None
 
 
+# -- POCSAG ------------------------------------------------------------------
+
+
+def test_pocsag_is_attached_to_a_two_way_channel_and_to_nothing_else():
+    """The mirror image of RDS: what POCSAG needs is a *narrow* FM channel.
+
+    A broadcast station is 200 kHz wide and carries no pager traffic, so a
+    decoder left attached there would cost 1.3% of a core for the whole time
+    somebody was listening to music.
+    """
+    engine = Engine()
+    assert engine._pocsag is None
+
+    engine._rebuild("nfm", 20_000.0)
+    assert engine._pocsag is not None
+    assert engine._demod.data_sink is engine._pocsag
+
+    engine._rebuild("wfm", None)
+    assert engine._pocsag is None
+    assert engine._demod.data_sink is None
+
+
+def test_pocsag_and_rds_do_not_evict_one_another():
+    """Two decoders, two slots. One slot would make this silently exclusive."""
+    engine = Engine()
+    engine._rebuild("wfm", 200_000.0)
+    assert engine._rds is not None
+    assert engine._demod.mpx_sink is engine._rds
+    assert engine._demod.data_sink is None
+
+    engine._rebuild("nfm", 20_000.0)
+    assert engine._demod.mpx_sink is None
+    assert engine._demod.data_sink is engine._pocsag
+
+
+def test_pocsag_can_be_switched_off():
+    engine = Engine()
+    engine._rebuild("nfm", 20_000.0)
+    engine.set_pocsag(False)
+    engine._apply_pocsag()
+    assert engine._pocsag is None
+    assert engine._demod.data_sink is None
+
+
 # -- stereo ------------------------------------------------------------------
 
 

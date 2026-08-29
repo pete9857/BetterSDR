@@ -29,8 +29,14 @@ GLYPHS = {
     "shield": "\N{SHIELD}",
     "key": "\N{KEY}",
     "walkie": "\N{PUBLIC ADDRESS LOUDSPEAKER}",
+    "pager": "\N{PAGER}",
     "chip": "\N{ANTENNA WITH BARS}",
     "wave": "\N{WAVY DASH}",
+    # Not band-plan icons: these two mark the quick-tune chips, where the
+    # difference between "you chose this" and "you happened to hear this" is
+    # the only thing distinguishing two otherwise identical buttons.
+    "star": "\N{WHITE MEDIUM STAR}",
+    "clock": "\N{CLOCK FACE THREE OCLOCK}",
     "question": "\N{BLACK QUESTION MARK ORNAMENT}",
 }
 

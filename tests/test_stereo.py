@@ -20,7 +20,12 @@ import pytest
 from scipy.signal import firwin, lfilter
 
 from bettersdr.dsp import demod
-from bettersdr.dsp.stereo import LOCK_DB, MIN_MPX_RATE_HZ, StereoDecoder
+from bettersdr.dsp.stereo import (
+    BLEND_FULL_DB,
+    LOCK_DB,
+    MIN_MPX_RATE_HZ,
+    StereoDecoder,
+)
 
 MPX_RATE = 240_000.0
 SUBCARRIER_HZ = 38_000.0
@@ -198,6 +203,109 @@ def test_switching_the_decoder_off_leaves_the_sum_alone():
     total, side = run(decoder, mpx)
     assert not np.any(side)
     assert total.size == mpx.size
+
+
+# -- blending towards mono ------------------------------------------------
+
+
+def weak(noise: float, seconds: float = 2.0):
+    """A station with a tone in the left channel and `noise` on top of it."""
+    left = tone(1_000.0, seconds)
+    return multiplex(left, np.zeros(left.size, np.float32), noise=noise)
+
+
+def test_a_clean_station_is_not_blended_at_all():
+    """The blend must be free on a signal that does not need it."""
+    decoder = StereoDecoder(MPX_RATE)
+    run(decoder, weak(0.0))
+    assert decoder.blend == 1.0
+    assert decoder.margin_db > BLEND_FULL_DB
+
+
+def test_a_weak_station_is_blended_towards_mono():
+    """Part of the difference channel, not all of it and not none of it."""
+    decoder = StereoDecoder(MPX_RATE)
+    run(decoder, weak(0.09))
+    assert decoder.locked
+    assert 0.2 < decoder.blend < 0.8
+
+
+def test_blending_costs_separation_and_buys_quiet():
+    """The trade the whole feature is: less stereo, less hiss.
+
+    Measured on the difference channel rather than on the two ears, because
+    that is where both halves of the trade live - the programme it carries is
+    the separation, and the noise it carries is what blending removes.
+    """
+    mpx = weak(0.09)
+    blended, plain = StereoDecoder(MPX_RATE), StereoDecoder(MPX_RATE)
+    plain.blend_enabled = False
+    _, quiet = run(blended, mpx)
+    _, loud = run(plain, mpx)
+
+    assert plain.blend == 1.0
+    # Both the tone and the hiss come down, which is the point: what the
+    # listener hears is the sum, where the tone is still at full strength.
+    assert level_db(baseband(quiet)[-100_000:], 1_000.0) < level_db(
+        baseband(loud)[-100_000:], 1_000.0
+    )
+    assert float(np.mean(quiet**2)) < 0.5 * float(np.mean(loud**2))
+
+
+def test_a_station_too_weak_for_the_difference_channel_is_reported_as_mono():
+    """Fully blended is mono, and has to be said as mono.
+
+    The station is still locked - there is a pilot up there and it is real -
+    but nothing of the difference channel is reaching the ears, and a badge
+    lit over two identical channels is the receiver claiming something it is
+    not doing.
+    """
+    decoder = StereoDecoder(MPX_RATE)
+    _, side = run(decoder, weak(0.18))
+    assert decoder.locked
+    assert decoder.blend == 0.0
+    # The tail, not the whole thing: the blend opens at full and takes about
+    # a second of margin measurement to decide the station cannot carry it.
+    assert not np.any(side[-100_000:])
+
+
+def test_switching_blending_off_leaves_a_weak_station_in_stereo():
+    """It is a judgement about noise, so it has to be possible to disagree."""
+    decoder = StereoDecoder(MPX_RATE)
+    decoder.blend_enabled = False
+    _, side = run(decoder, weak(0.18))
+    assert decoder.blend == 1.0
+    assert np.any(side)
+
+
+def test_the_blend_arrives_as_a_ramp_rather_than_a_step():
+    """A gain that steps between blocks is a click, once per block.
+
+    The weight is therefore a ramp across the block from where it was to
+    where it is going, which is visible here as a difference channel that
+    starts almost silent and ends at full strength.
+    """
+    decoder = StereoDecoder(MPX_RATE)
+    mpx = weak(0.0)
+    run(decoder, mpx)
+    assert decoder.blend == 1.0
+
+    # As if the station had just been weak enough to be nearly mono.
+    decoder.blend = 0.0
+    _, side = decoder.process(mpx[: 24_000])
+    assert side is not None
+    opening = float(np.mean(np.abs(side[:2_000])))
+    closing = float(np.mean(np.abs(side[-2_000:])))
+    assert opening < 0.2 * closing
+
+
+def test_reset_forgets_the_blend_as_well():
+    decoder = StereoDecoder(MPX_RATE)
+    run(decoder, weak(0.09))
+    assert decoder.blend < 1.0
+    decoder.reset()
+    assert decoder.blend == 1.0
+    assert decoder.margin_db == 0.0
 
 
 # -- through the real demodulator ------------------------------------------

@@ -49,6 +49,13 @@ from ..decode.hdradio import (
     HdRadio,
     HdState,
 )
+from ..decode.pocsag import (
+    MIN_IF_RATE_HZ as POCSAG_MIN_IF_RATE_HZ,
+)
+from ..decode.pocsag import (
+    PocsagReceiver,
+    PocsagState,
+)
 from ..decode.rds import MIN_IF_RATE_HZ, RdsReceiver, RdsState
 from ..dsp import convert, demod
 from ..dsp.chain import AudioChain, FrontEnd
@@ -154,11 +161,21 @@ class DisplayFrame:
     # not found the signal yet - that one is running with `synced` false, and
     # the screen says so differently.
     hd: HdState | None = None
+    # The pager traffic on this channel, where anything is listening for it.
+    # None means nothing is - a mode or a channel too wide to carry POCSAG,
+    # or the feature switched off - which is a different thing from a quiet
+    # channel, and the screen says so differently.
+    pocsag: PocsagState | None = None
     # Whether what just went to the sound card was two different channels.
     # Reported from the audio rather than from the pilot on purpose: audio
     # noise reduction mixes down, so a pilot-only flag would light the
     # indicator while both ears heard the same thing.
     stereo: bool = False
+    # How much of the difference channel survived the blend, 0 to 1. 1.0 when
+    # nothing is being blended away and when nothing is decoding stereo at
+    # all, so a screen can show the number only when it is below 1 and say
+    # nothing the rest of the time.
+    stereo_blend: float = 1.0
 
     def frequencies(self) -> np.ndarray:
         """Absolute frequency of each bin, low to high."""
@@ -304,10 +321,21 @@ class Engine:
         # this app can put on the screen.
         self.rds_enabled = True
         self._rds: RdsReceiver | None = None
+        # Pager traffic, on the same tap. On by default for the same reason
+        # RDS is: it costs 1.3% of a core, it only attaches on a two-way FM
+        # channel narrow enough to be one, and a beginner who tunes across a
+        # paging transmitter has no way of knowing to go and switch it on.
+        self.pocsag_enabled = True
+        self._pocsag: PocsagReceiver | None = None
         # Broadcast FM has been stereo since 1961 and the difference channel
         # is right there in the multiplex, so this is on by default too. It
         # costs nothing on any other mode, where no decoder is attached.
         self.stereo_enabled = True
+        # Whether to fade the difference channel out as a station weakens.
+        # The difference channel sits where FM noise is worst, so on a fringe
+        # station stereo is the loudest thing about it - but that is a
+        # judgement about noise rather than a fact, so it is a switch.
+        self.stereo_blend = True
         self._stereo: StereoDecoder | None = None
         self._stereo_out = False
         # Aircraft tracking is a place the radio *goes*, not a decoder hung
@@ -366,6 +394,7 @@ class Engine:
         self._wanted_mode = self.mode
         self._wanted_bandwidth_hz = self._demod.bandwidth_hz
         self._apply_rds()
+        self._apply_pocsag()
         self._apply_stereo()
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
         self._scan_mailbox: Mailbox[ScanUpdate] = Mailbox()
@@ -521,6 +550,7 @@ class Engine:
         # A new frequency is a new station, and the old one's name lingering
         # on screen over somebody else's signal is worse than a blank.
         self._commands.put(self._reset_rds)
+        self._commands.put(self._reset_pocsag)
         self._commands.put(self._reset_stereo)
         # A new carrier needs a new decoder - nrsc5 cannot be moved to one -
         # and a station arrived at with the switch already on needs a session
@@ -678,10 +708,20 @@ class Engine:
         self.stereo_enabled = bool(enabled)
         self._commands.put(self._apply_stereo)
 
+    def set_stereo_blend(self, enabled: bool) -> None:
+        """Fade towards mono as a station gets too weak to carry stereo."""
+        self.stereo_blend = bool(enabled)
+        self._commands.put(self._apply_stereo)
+
     def set_rds(self, enabled: bool) -> None:
         """Read the data a broadcast FM station sends alongside its audio."""
         self.rds_enabled = bool(enabled)
         self._commands.put(self._apply_rds)
+
+    def set_pocsag(self, enabled: bool) -> None:
+        """Read the text messages on a pager channel."""
+        self.pocsag_enabled = bool(enabled)
+        self._commands.put(self._apply_pocsag)
 
     def set_hd(self, enabled: bool) -> None:
         """Listen to the digital programme instead of the analog one.
@@ -1631,6 +1671,33 @@ class Engine:
         if self._rds is not None:
             self._rds.reset()
 
+    def _apply_pocsag(self) -> None:
+        """Attach or detach the pager decoder, on the DSP thread.
+
+        The same shape as `_apply_rds` with the conditions turned round.
+        POCSAG is not a subcarrier riding above the audio, it *is* the
+        deviation - so what it needs is a two-way FM channel rather than a
+        broadcast one. The upper bound on the bandwidth is what keeps it off
+        broadcast FM, where it would find nothing and cost CPU for the whole
+        time somebody was listening to music.
+        """
+        wanted = (
+            self.pocsag_enabled
+            and hasattr(self._demod, "data_sink")
+            and self._demod.if_rate >= POCSAG_MIN_IF_RATE_HZ
+            and 10_000.0 <= self._demod.bandwidth_hz <= 50_000.0
+        )
+        if not wanted:
+            self._pocsag = None
+        elif self._pocsag is None or self._pocsag.if_rate != self._demod.if_rate:
+            self._pocsag = PocsagReceiver(self._demod.if_rate)
+        if hasattr(self._demod, "data_sink"):
+            self._demod.data_sink = self._pocsag
+
+    def _reset_pocsag(self) -> None:
+        if self._pocsag is not None:
+            self._pocsag.reset()
+
     def _apply_stereo(self) -> None:
         """Attach or detach the stereo decoder, on the DSP thread.
 
@@ -1650,6 +1717,8 @@ class Engine:
             self._stereo = None
         elif self._stereo is None or self._stereo.sample_rate != self._demod.if_rate:
             self._stereo = StereoDecoder(self._demod.if_rate)
+        if self._stereo is not None:
+            self._stereo.blend_enabled = self.stereo_blend
         if hasattr(self._demod, "stereo"):
             self._demod.stereo = self._stereo
 
@@ -1686,6 +1755,7 @@ class Engine:
         self._apply_deemphasis()
         self._apply_if_noise_reduction()
         self._apply_rds()
+        self._apply_pocsag()
         self._apply_stereo()
 
     # -- recording, on the DSP thread --------------------------------------
@@ -1923,7 +1993,13 @@ class Engine:
                         else self._rds.snapshot()
                     ),
                     hd=None if self._hd is None else self._hd.snapshot(),
+                    pocsag=(
+                        None if self._pocsag is None else self._pocsag.snapshot()
+                    ),
                     stereo=self._stereo_out,
+                    stereo_blend=(
+                        1.0 if self._stereo is None else self._stereo.blend
+                    ),
                 )
             )
 

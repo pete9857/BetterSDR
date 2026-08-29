@@ -280,6 +280,13 @@ checklist rather than assuming.
   separation on a synthetic broadcast and locked on every local station
   tried, at 14–27 dB of pilot margin. Findings are in **Amendment 8**.
 
+  A weak station is now faded towards mono rather than left in noisy stereo:
+  the difference channel is weighted between full and nothing across 20 dB
+  to 11 dB of pilot margin, and a station blended all the way down is
+  reported as mono rather than as stereo with nothing in it. Added
+  2026-08-29; **Amendment 13** has the measurements and the one bug worth
+  knowing about.
+
   The audio path became mono-or-stereo to carry it: `AudioSink` now opens two
   channels and conforms whatever it is handed, `ClockSync` stretches both
   channels onto one grid, `Squelch`, `BiquadState` and `Agc` take a frame axis
@@ -301,7 +308,10 @@ checklist rather than assuming.
   block the demodulator would have had - a second consumer of the block, not
   a second owner of the device - and gives everything back when it stops.
   `ui/aircraft_view.py` is the third screen, a list that fills itself in with
-  no tuning, no mode and no bandwidth to get wrong.
+  no tuning, no mode and no bandwidth to get wrong - and, since 2026-08-29, a
+  map above it, framed on whatever has been heard, with trails, a graticule,
+  a scale bar and the coastline of the United States behind it.
+  **Amendment 14** has that.
 
   Off air, indoors, on the stock aerial: **six aircraft in 70 seconds at
   ~800 messages a minute**, 248 positions, callsigns and altitudes and tracks
@@ -341,14 +351,59 @@ checklist rather than assuming.
   One thing it deliberately does not do: change programme without restarting
   the decoder. nrsc5 takes that only as a console keypress, which a pipe
   cannot deliver, so HD1 to HD2 costs the acquisition again.
-- POCSAG → pager text. A strong "look what's out there" demo.
+- **POCSAG** → pager text. A strong "look what's out there" demo.
+
+  **Status: complete, tested against synthetic transmissions; not yet heard
+  off air.** `decode/pocsag.py` takes the FM discriminator output and produces
+  pages with a capcode and their text: a DC-tracked slicer with an
+  interpolating bit clock running at all three baud rates at once, stateless
+  frame sync on the 32-bit sync codeword, BCH(31,21) with one bit of
+  correction, and both the numeric and the 7-bit alphanumeric readings of the
+  message. It costs **1.3% of a core**, hangs off a tap of its own on
+  `_FmBase` beside the RDS one, and attaches only on a narrow FM channel —
+  which is what keeps it off broadcast FM, where it would find nothing.
+
+  `ui/widgets/pagerlog.py` is a panel under the waterfall that stays hidden
+  until a sync codeword has actually been seen, so the moment it appears is
+  itself the finding. `scan/bandplan/us.yaml` gains the 929–932 MHz paging
+  band as a scan target.
+
+  Two things it deliberately does not do, both the RDS rule again. It corrects
+  one bit rather than the two BCH(31,21) can manage, because a mis-corrected
+  address codeword is somebody's message shown against somebody else's pager
+  number. And it reports a page with no message as a beep rather than as an
+  empty string, because that is a real thing pagers do.
+
+  **What has not been tested: the whole thing against real air.** Nothing in
+  it has met a transmitter. See **Amendment 11**.
 - Favourites, recently played, session history.
+
+  **Status: complete, 2026-08-29.** `core/history.py` records where the radio
+  has been — a dwell gate so that tuning across a band is not mistaken for
+  listening to it, a recent list persisted to `history.json`, and this
+  session's trail behind a Back button. `Bookmark` gains a `favourite` flag,
+  so a favourite is the saved entry marked rather than a second record of the
+  same station. `ui/widgets/quicktune.py` is a strip of chips above the band
+  buttons on Discover — favourites first, then recently played, no frequency
+  twice — which hides itself until there is something in it, so a first run
+  sees exactly the screen it saw before this existed. The listening screen
+  gains a Recently played section at **Simple**, where nothing else is: a
+  beginner who tunes away from something they were enjoying previously had no
+  way back to it. Findings are in **Amendment 12**.
+
+  Two things it deliberately does not do. It does not record a frequency the
+  dial merely passed through, and it does not count time spent on another
+  screen — a station left playing behind Discover accrues nothing, because
+  "played" means somebody was listening.
 
 ### Phase 5 — Packaging
 
 - PyInstaller **one-folder** (`--onedir`, not `--onefile`: faster startup, far fewer AV false positives).
 - Bundle blog-fork V1.4.0 x64 `rtlsdr.dll`, `libusb-1.0.dll`, `pthreadVC2.dll`, `msvcr100.dll` into `_internal/drivers/`.
 - Ship a README noting the unsigned-binary SmartScreen warning and the "More info → Run anyway" path.
+- The README credits Natural Earth for the map data (public domain, so this
+  is courtesy rather than obligation) and states nrsc5's GPL-3 licence and
+  the process boundary that keeps it off the rest of the application.
 
 ## Verification
 
@@ -1031,18 +1086,25 @@ bookmark named `KUOW`.
 
 ## Still open in Phase 4
 
-- **Stereo blend on a weak signal.** The difference channel sits at 23–53 kHz
-  where FM noise rises as f², so a weak station is 20 dB noisier in stereo
-  than in mono. Real receivers blend towards mono as the signal drops. The
-  measurements below say the local stations do not need it, but a fringe one
-  will.
+- ~~**Stereo blend on a weak signal.**~~ Shipped on 2026-08-29. The penalty
+  measured 15.4 dB rather than the 20 estimated here, and is the same at
+  every signal level that decodes at all. `StereoDecoder` now fades the
+  difference channel out between 20 dB and 11 dB of smoothed pilot margin and
+  reports mono when it reaches the bottom. See **Amendment 13**.
 - **Group 4A clock time, and alternate frequencies (0A blocks C/D).** Both are
   small additions to `RdsDecoder.update`.
-- **POCSAG**, and favourites/recently-played, all untouched. HD Radio
-  shipped; see **Amendment 10**.
-- **A map for the aircraft screen.** Positions are decoded and shown as
-  numbers; a map is the obvious next step and is a self-contained piece of
-  work. Nothing else needs it.
+- **POCSAG off air.** It shipped, but only against synthetic transmissions —
+  see **Amendment 11** for the one-line hardware check it still needs.
+  Favourites, recently played and session history shipped on 2026-08-29;
+  what is left of them is listed in **Amendment 12**.
+- ~~**A map for the aircraft screen.**~~ Shipped on 2026-08-29.
+  `ui/widgets/planemap.py` draws the aircraft, their trails, a graticule, a
+  scale bar and - since later the same day - the coastlines, lakes, state
+  borders and cities of the United States, from 234 KB of public-domain
+  Natural Earth vectors compiled into the package. Verified with real
+  aircraft. What is left is a home position: the receiver does not know
+  where it is, so there are no range rings and no bearings, and
+  `_cpr_local` has no reference of its own either. See **Amendment 14**.
 - **Aircraft heard while doing something else.** Tracking takes the radio
   over completely, which is honest but exclusive - a second dongle, or
   time-slicing against listening, is the only way round it and neither is
@@ -1051,6 +1113,207 @@ bookmark named `KUOW`.
   87.6 ms and a dwell is 50 ms — so it would need a second pass that parks on
   each candidate for a second or two. Worth doing, and a different feature
   from the sweep.
+
+---
+
+## Amendment 14 — A map with nothing under it (2026-08-29)
+
+Positions were being decoded from the first day ADS-B shipped and shown as
+two numbers on a card. Numbers are the wrong shape for a position: the whole
+point of hearing six aircraft at once is the *arrangement* of them, which no
+column of decimals will ever show.
+
+### The thing this map does not have
+
+Every map anybody has seen has a basemap under it, and the first version of
+this one did not. A tile is a network request; a tile service is a dependency
+that can go away, change its terms or want attribution, in an application
+whose entire claim is that it works off a dongle and a laptop with nothing
+else plugged in.
+
+That argument turned out to be an argument against *tiles*, not against a
+basemap - see the section at the end of this amendment, written the same day
+after the size was actually measured. What it correctly rules out remains
+ruled out: nothing is fetched while the app is running.
+
+### The consequence, which is that there is no centre
+
+The receiver does not know where it is. Nothing in ADS-B tells it, and asking
+a beginner for their latitude before they can see anything is the
+configuration screen this app exists to avoid. So the map has no fixed frame
+of reference and frames itself on whatever it has heard.
+
+That is honest and it works immediately, and it has two edges worth writing
+down. A **single** aircraft has no extent at all, so fitting to the bounding
+box divides by approximately nothing — hence `MIN_SPAN_NM`, a floor of six
+miles across, which is about what a receiver hears when only one aircraft is
+in range. And the fit has to stay **invertible**, so that a place on the
+screen is a place on the earth: equirectangular about the centre of the view,
+longitude squeezed by the cosine of the centre latitude. At Seattle's 47.6
+degrees that squeeze is 0.674, and leaving it out draws a north-south airway
+as a diagonal.
+
+### Two smaller things, both the same shape
+
+**A trail grows on a move, not on a frame.** An aircraft reports twice a
+second and the screen refreshes five times a second, so appending on every
+update is a list that grows without bound and draws a single point.
+`update_trails` is a plain function tested without a window for the same
+reason the colour maps are: what it gets wrong looks entirely normal for the
+first minute and is wrong after ten.
+
+**Longitude labels collide where latitude labels do not.** The graticule is
+square in degrees, so its vertical lines are 1/cos(lat) closer together in
+pixels than its horizontal ones — half as far again at this latitude — and a
+spacing that reads comfortably down the side is a solid row of overlapping
+text along the bottom. The lines are all drawn; only the labels are thinned.
+
+### The basemap, added the same day
+
+The objection above was to tiles. Asked what a *bundled* vector map would
+cost, the honest answer needed a measurement rather than an intuition, so
+the data was downloaded and encoded before anything was decided.
+
+**The whole United States is 75,000 points.** Natural Earth at 1:10m,
+clipped to the country, is 45,870 coastline points, 19,659 of lakes and
+12,825 of state boundaries. Delta-encoded along each line as int16 steps on
+an 11 metre grid and zlib'd, that is **234 KB including 482 cities with
+their names and populations** - a fifth of the driver DLLs this repository
+already commits on purpose, and 3.5% of the bundled nrsc5 binary. Against a
+frozen build carrying PySide6, numpy and scipy it does not register. Size
+was never the reason.
+
+**Natural Earth rather than OpenStreetMap, and the reason is licensing.**
+OSM data is ODbL: attribution on the map, and share-alike obligations on
+anything derived from the database. Natural Earth is public domain, no
+permission needed and no credit required - it is credited anyway. This
+project already has one licensing boundary it has to be careful about, and
+this is the version of that question that can simply be avoided.
+
+**Steps rather than positions.** A coastline moves a few units at a time, so
+storing steps makes the high byte of every int16 zero and that is what
+compresses. Varints are 11 KB smaller (215 KB against 226) and were not
+worth it: int16 decodes as `frombuffer` plus one `cumsum` per line, which is
+**24 ms for the whole file**, once, at startup. The one thing it costs is
+that a simplified border can be a single segment several degrees long, which
+overflows an int16 - so the build puts points back into those.
+
+**The obvious optimisation was the slow one.** The projection is affine, so
+the tempting design is one path per layer built in degrees and a
+`QTransform` per frame: build once, draw many. It measured **26 ms a frame
+against 8**, because Qt then walks and clips the whole country's path every
+time. Culling by bounding box in Python and rebuilding the path each frame
+wins - and caching the *flattened* result against a window rounded outwards
+to 0.05 degrees means the frame moving, which happens whenever an aircraft
+does, costs nothing at all.
+
+What is left of the cost is drawing: **4.3 ms at the widest view, 3 ms of it
+antialiasing**, which at 5 Hz is 2% of a core and is worth paying. Building
+the path from arrays is 0.17 ms; visiting the points from Python instead was
+11.6 ms, which is what `pyqtgraph.functions.arrayToQPath` is there to avoid.
+
+**A missing data file gives a plainer map, not an error.** The land is
+decoration and must not be able to stop the aircraft being drawn - the same
+rule as a corrupt settings file being replaced by defaults.
+
+### What is left
+
+**A home position.** It would buy range rings, a bearing to each aircraft, a
+distance in the list, and a fixed frame that does not move when an aircraft
+leaves — and it would give `_cpr_local` a reference of its own, which is
+currently the aircraft's own last position and nothing else. It is a setting
+and a marker, not a redesign. The basemap makes it less urgent than it was,
+because a coastline answers "where am I" on its own.
+
+**The map is only the United States.** A second region is a second `.bsm`
+and a rebuild, exactly as a second band plan is a second YAML - but nothing
+selects one yet, and an aircraft heard in Europe would be drawn over empty
+space with a correct graticule around it.
+
+**Panning and zooming.** The projection is invertible and the fit is one
+function, so both are small; what stops it being obvious is that an
+auto-framing map and a hand-driven one need different rules about when to
+re-fit, and getting that wrong is a map that fights the mouse.
+
+**Nothing is clickable.** Selecting an aircraft on the map and having its
+card scroll into view is the natural next join between the two halves of the
+screen.
+
+---
+
+## Amendment 13 — Blending to mono, and an asymmetry borrowed from the wrong place (2026-08-29)
+
+FM stereo shipped in Phase 4 working and unqualified: lock on every local
+station, 61 dB of separation on a synthetic broadcast. What it did not do was
+notice that stereo is not always worth having. The difference channel sits at
+23–53 kHz, where FM noise rises as the square of the frequency, so a fringe
+station is *noisier* in stereo than in mono — and the receiver was choosing
+stereo whenever a pilot was present, which on a distant station is exactly
+when it should not.
+
+### What the penalty actually is
+
+Estimated at 20 dB in the Phase 4 plan; **measured at 15.4 dB**, by sweeping a
+synthetic stereo broadcast through the real WFM demodulator with complex noise
+added at the antenna. The number barely moves: 15.2 dB on a clean carrier,
+15.5 dB at the FM threshold. It is a property of where the difference channel
+sits, not of the station.
+
+That has a consequence for how the blend can be decided. Comparing the noise
+in the two channels always returns the same 15 dB, so it says nothing about
+whether this particular station needs blending. What matters is the *absolute*
+noise in the difference channel, and the pilot is the reference that measures
+it: a 10% pilot is fixed by the standard, and the guard band immediately below
+it is the same noise the difference channel is about to be built from. Over a
+27 dB sweep the pilot-to-guard margin tracked the carrier-to-noise ratio to
+within a couple of dB.
+
+So the two thresholds are measured rather than chosen. At **20 dB** of margin
+the difference channel is carrying about 12 dB of signal-to-noise and is
+still worth its cost; by **11 dB** it is carrying none at all, the carrier
+being at the FM threshold. Between them the weight is a straight line.
+
+### The bug, which is the interesting part
+
+The first version rode the margin down quickly and back slowly — the audio
+AGC's attack and release, which is right there and wrong here. A single
+block's margin swings several dB whatever the signal is doing, for the same
+reason a single periodogram bin does, and an asymmetric smoother on a noisy
+estimate does not average it: it parks at whichever extreme it reaches
+faster. A **clean, noiseless** synthetic broadcast came out at **blend 0.70
+and 12 dB of separation**, where it should have been 1.00 and 33.
+
+The fix is to average the two powers symmetrically over half a second first,
+and read the blend straight off the smoothed margin — 1.00 and 33.7 dB. The
+fast path is not needed for the case it was there for: a signal that
+genuinely collapses trips the lock's own hysteresis, which drops the
+difference channel outright and is the honest answer to a station that has
+gone away.
+
+### Two smaller things
+
+**The weight is a ramp across the block, not a number for it.** A gain that
+steps between blocks is a click once per block — the same class of fault as a
+filter that forgets its history — so each block ramps from the previous
+weight to the new one. It short-circuits to a scalar 1.0 when both ends are
+1.0, which is every block of a strong station, so blending costs nothing on
+the signals that do not need it: 1.5 ms per second of radio when it is
+working, none when it is not.
+
+**Fully blended has to be reported as mono.** At weight 0 the two channels are
+identical, and a lit STEREO badge over them is the receiver claiming something
+it is not doing. The difference comes back as `None` — the same answer as no
+pilot at all — and the audio returns to a single channel. The station is
+still *locked*, which is a different question, and `pilot_db` still answers
+it honestly.
+
+### What is left
+
+The blend is a whole-band weight. Real tuners also roll the *top* off the
+difference channel first, because that is where its noise is worst, which
+keeps some separation on a station this fades to mono. And it is a switch at
+Expert rather than a slider: somebody who wants stereo on a fringe station can
+have it, but cannot yet say where the fade should start.
 
 ---
 
@@ -1459,3 +1722,243 @@ MER +12.2, then off to a stereo FM station with its RDS name intact — **0
 underruns and 0 ring overruns end to end**.
 
 ---
+
+---
+
+## Amendment 11 — POCSAG, and three ways a bit clock can be right for the wrong reason (2026-08-29)
+
+POCSAG is the simplest signal in the app — two frequencies, no carrier to
+recover, no constellation to rotate — and that is exactly what makes it easy
+to build something that decodes the test and nothing else. Every finding below
+is about the gap between "the bits come out" and "the bits come out whatever
+the air does".
+
+### The design
+
+The chain is short. The FM discriminator already produces the frequency
+deviation; POCSAG *is* that deviation, so there is no subcarrier to mix down
+and no filter in front of the slicer. What there is instead is a bit clock, a
+frame finder and a checkword, and each of the three has a decision in it.
+
+**The bit clock is the RDS timing loop again, and for the same reason.** There
+is no whole number of samples per bit at any rate the radio produces — 512 bps
+at a 96 kHz IF is 187.5 — so the bit instants are a floating-point ramp and
+the value of each bit is the *integral across it*, read as the difference of a
+running sum at two fractional positions with `np.interp`. That integral is the
+matched filter for a rectangular symbol, which is why nothing filters ahead of
+it; and the half-sample correction is the one ADS-B needed, for the same
+reason. Timing is steered the way RDS steers its symbol clock: read the same
+block at sixteen positions across the bit, take the one where the readings are
+largest, and move a third of the way towards it. A clock half a bit out
+averages every transition away, so that metric has one maximum by
+construction.
+
+**All three baud rates run at once.** The alternative is detecting the rate
+from the preamble, which throws away every transmission whose preamble was
+missed — and a transmission whose preamble was missed is exactly the one a
+user tuning across the band arrives in the middle of. Three vectorised passes
+cost 1.3% of a core between them, which is less than deciding cleverly would
+be worth.
+
+**Frame sync is stateless.** Every batch opens with the same 32-bit sync
+codeword and a batch is 544 bits, so rather than acquire and hold a lock the
+receiver looks for that codeword everywhere and decodes the 544 bits behind
+each hit. Allowing two bit errors in the match, a false hit turns up once in
+eight million bit positions — an hour of a 2400 bps channel — and the sixteen
+codewords behind it still have to pass their own checkwords. Holding a lock
+would buy nothing and would need a recovery path of its own.
+
+### The three that matter
+
+**A message that fills its last batch exactly has nothing to end it.** A page
+is terminated by an idle codeword or by the next address codeword, and a
+transmitter that stops on a batch boundary sends neither — so the message sits
+half-assembled and never reaches the screen. Two of the first synthetic
+transmissions written hit this, which is a fair sign of how common it is. The
+fix is a staleness rule expressed in *bits*: a message is over once a whole
+batch's worth of the stream has gone by with no batch in it. It cannot be
+shorter than that, because a batch's worth of bits is exactly how long it
+takes to know that a batch which *would* have been adjacent is not there. On
+air that is half a second at 1200 bps, which is about as fast as a message
+could honestly be declared over.
+
+**One bit of correction, not two.** BCH(31,21) has a minimum distance of six
+and can correct two errors, which is what most pager decoders do. It also
+means three errors can land within two of the *wrong* codeword, and a
+mis-corrected address codeword is somebody's message shown against somebody
+else's pager number. Correcting one error needs five to go wrong the same way.
+This is the RDS rule — "a mis-corrected block puts plausible wrong text on the
+screen" — applied at the one setting where refusing to correct at all would
+cost most of the traffic rather than a little of it.
+
+**Two decoders, two taps.** RDS and POCSAG both want the same point in the FM
+path: after the discriminator, before de-emphasis and before the audio filter.
+It is tempting to give them one slot, because their attach conditions are
+mutually exclusive — RDS needs a 200 kHz broadcast channel and POCSAG a
+12.5 kHz two-way one, so the two are never wanted at once. But one slot means
+whichever attached last silently detaches the other, and the failure that
+produces is a feature that simply stopped working with nothing on screen to
+say why. `_FmBase.data_sink` is separate from `mpx_sink` for that reason and
+no other.
+
+### Which way round the bits are
+
+Three orderings in this protocol run against the obvious reading, and each of
+them produces output rather than an error.
+
+- **The deviation's polarity is not fixed.** Which way a transmitter deviates
+  for a binary one, and which side of the tuner the channel landed on, both
+  flip it. So the sync codeword is matched against *and* against its inverse,
+  and the batch behind an inverted match is inverted before it is read.
+- **Alphanumeric characters arrive least significant bit first**, seven bits
+  at a time, packed across codeword boundaries with no alignment to them.
+- **Numeric digits arrive least significant bit first too**, four bits at a
+  time — so the character table is indexed by the nibble as transmitted and
+  the reversal is baked into the table rather than done at every lookup.
+
+And one that is not about bit order at all: **the bottom three bits of a
+capcode are never transmitted.** They are which of the eight frames of the
+batch the address codeword was placed in, which is how a pager can listen to
+one eighth of the traffic and sleep through the rest. A decoder that ignores
+that gets every capcode wrong by up to seven and looks almost right.
+
+### Cost
+
+Measured over three seconds of signal, per second of radio:
+
+| IF rate | Traffic | Noise only |
+|---|---|---|
+| 96 kHz (2.4 MS/s window, NFM at 20 kHz) | 12.0 ms | 13.6 ms |
+| 240 kHz (240 kS/s window) | 12.9 ms | 13.6 ms |
+
+1.2–1.4% of one core either way, against the NFM demodulator feeding it and
+RDS's 2.4%. It costs slightly *more* on noise than on traffic, which is the
+right way round: the expensive part is the three timing loops, which run
+whatever is there, and the cheap part is checking codewords, which only
+happens behind a sync word.
+
+### On screen
+
+The panel lives under the waterfall rather than beside it, and it stays hidden
+until a sync codeword has actually been seen. Two reasons. A panel that
+appears on every narrow FM channel and never says anything teaches a beginner
+to ignore that part of the screen; and the moment it does appear is itself the
+finding — "there is pager traffic here" — which is the same argument the
+Discover list makes. Rows are appended rather than rebuilt, because a message
+does not change once it is decoded and rebuilding the list thirty times a
+second would throw away the reader's scroll position before they finished a
+sentence. `_forget_station` clears it: pager traffic belongs to a channel, and
+carrying it to the next frequency would put somebody else's messages under a
+heading that says they were heard here.
+
+`scan/bandplan/us.yaml` gains **Pagers, 929–932 MHz**, as a scan target with a
+25 kHz raster and a 20 kHz channel filter — wider than the 12.5 kHz two-way
+default, because a pager deviates ±4.5 kHz and a filter sized for speech takes
+the corners off the bits.
+
+### What has been tested, and what has not
+
+Twenty-eight tests against a synthetic transmitter written independently of
+the decoder — its checkword is long division against the polynomial, not a
+call to the receiver's own routine. They cover all three baud rates, six
+arrival phases across a bit, inverted deviation, a quarter of full deviation
+of tuning error, a transmitter clock 100 ppm out, noise, four DSP block sizes
+from 256 to 32,768 samples, a message spanning three batches, eight capcodes
+landing in all eight frames, and the whole path through the NFM demodulator at
+2.4 MS/s. Noise alone and silence both decode to nothing.
+
+**None of it has met a real transmitter.** That is the position ADS-B was in
+before 2026-08-28, and the ADS-B experience is why it is worth saying plainly:
+the surface-versus-airborne CPR fault was invisible to every synthetic test
+and turned up in the first ninety seconds of real sky. The hardware check here
+is one line — tune to a busy channel in 929–932 MHz and watch the panel — and
+until it has been done, this feature is built rather than verified.
+
+---
+
+## Amendment 12 — Favourites, recently played, and what counts as listening (2026-08-29)
+
+This is the smallest feature in Phase 4 and the one with the most ways to be
+quietly wrong, because nothing about it fails loudly. A history that records
+the wrong things still shows a list; a list of the wrong things is just a
+worse app that nobody can point at.
+
+### The one decision everything else follows from
+
+**Tuning across a band is not listening to it.** The digit tuner emits a
+frequency per keystroke and click-to-tune emits one per click, so a history
+fed from "where is the radio" records the journey rather than the
+destinations — walking up the FM dial would leave eleven entries and no
+station. So a visit becomes an entry only after it has lasted, which is the
+scanner's persistence gate in another costume: seen once is not seen.
+
+That threshold is not a taste setting, because it has a floor and the floor
+is a measurement from elsewhere in this document. RDS needs a few seconds to
+confirm a name and HD Radio needs 5.5 to produce its first audio, so a dwell
+shorter than either would promote every entry *before anything could name
+it*, and the recent list would be a column of bare frequencies — which is
+precisely the screen this project exists to replace. Ten seconds clears both
+with room. It is also why a name arrives through `History.name()` afterwards
+rather than as an argument to `tune()`: at the moment the radio moves, nothing
+on air has said anything yet.
+
+### Time is accrued, not read off the clock
+
+`update()` is called from a view's own refresh timer, and `main_window`
+stops a page when it stops showing. So a station left playing behind the
+Discover screen accrues nothing while a sweep runs. That is deliberate and it
+is the honest reading of "played": it counts the time somebody was actually
+listening, not the time the tuner sat there. `MAX_TICK_SECONDS` covers the
+other half — a window minimised for an hour must not come back and claim the
+hour — and it is the same shape of guard as the one on a rate change.
+
+Two consequences worth naming. Leaving the listening screen calls `update()`
+and not `leave()`, so coming back two seconds later continues the visit
+instead of starting a second one and demanding another ten seconds. And
+retuning *inside* the bookmark match tolerance continues the visit too:
+without that, a station corrected by 100 Hz every few minutes could be
+listened to all evening and never recorded at all.
+
+### A favourite is a bookmark marked, not a second list
+
+`Bookmark` gained a `favourite` flag rather than there being a favourites
+collection. A separate collection is two records of one station, and the
+moment they disagree — a different mode, a frequency edited in one place —
+the favourite recalls something the saved entry says is wrong. This is the
+same argument `bookmarks.py` already makes for keeping the mode and bandwidth
+on the bookmark. The flag round-trips through CSV as `yes`, because the column
+is meant to be readable in a spreadsheet and typeable by hand.
+
+The strip on Discover takes favourites before it applies its limit, so
+somebody who stars nine stations gets nine chips. Quietly dropping the ninth
+in favour of something they heard once would be the app overruling the only
+explicit statement of preference it has. A station that is both a favourite
+and recently played appears once, as the favourite.
+
+### Where it is, and why there
+
+The strip sits **above the band chips** on Discover, because on the second run
+of the app it is a shorter route to hearing something than any sweep is — and
+it hides itself entirely until there is something in it, so a first run sees
+exactly the screen it saw before this existed. Same argument as the pager log:
+the moment it appears is itself worth something.
+
+The Recently played section on the listening screen is at **Simple**, which is
+the level with no mode control, no bandwidth and no gain. A beginner who tunes
+away from something they were enjoying previously had no way back to it at
+all. It is the one panel section that is more use the less of the app somebody
+understands.
+
+### What is left
+
+- **The trail is not persisted, only the recent list is.** Back is a
+  within-session idea, and a Back button that jumped to where the radio was
+  last Tuesday would be a different feature wearing the same label.
+- **Nothing prunes by age.** The list is capped at sixty by last-heard, so a
+  station heard once a year ago survives until sixty others displace it.
+  Whether that is a fault depends on how the list reads after a few months of
+  use, which is not knowable yet.
+- **`most_played` is computed and not shown anywhere.** It is a different and
+  probably better ordering for the strip than "most recent", and which one is
+  right is a question about how somebody actually uses the app rather than one
+  to be settled here.

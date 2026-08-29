@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +32,7 @@ from ..core.engine import Engine
 from ..decode.adsb import AdsbState, Aircraft
 from .levels import Level
 from .widgets.aircraftcard import AircraftCard
+from .widgets.planemap import PlaneMap
 
 REFRESH_HZ = 5
 
@@ -49,6 +51,7 @@ QPushButton#receive:hover { background: #7cdcff; }
    `discover_view.py` for what happens when only one of them is. */
 QScrollArea { border: none; background: #0b0e13; }
 QWidget#planeList { background: #0b0e13; }
+QSplitter::handle { background: #161c25; height: 3px; }
 """
 
 WAITING = (
@@ -99,9 +102,10 @@ class AircraftView(QWidget):
 
         subheading = QLabel(
             "Aircraft broadcast who they are, how high they are and where "
-            "they are, on 1090 MHz. The radio listens there while this screen "
-            "is running, so the station you were tuned to goes quiet until "
-            "you stop."
+            "they are, on 1090 MHz. They are drawn on the map as they report "
+            "a position, coloured by height. The radio listens there while "
+            "this screen is running, so the station you were tuned to goes "
+            "quiet until you stop."
         )
         subheading.setObjectName("subheading")
         subheading.setWordWrap(True)
@@ -121,6 +125,13 @@ class AircraftView(QWidget):
         self.status.setObjectName("status")
         outer.addWidget(self.status)
 
+        self.map = PlaneMap()
+        self.map.setToolTip(
+            "Everything that has said where it is, drawn to fit. There is no "
+            "street map underneath because nothing here is downloaded - what "
+            "is on screen is what the aerial received."
+        )
+
         self.list_area = QScrollArea()
         self.list_area.setWidgetResizable(True)
         self.list_area.viewport().setAutoFillBackground(True)
@@ -139,7 +150,18 @@ class AircraftView(QWidget):
         self.list_layout.addWidget(self.empty)
         self.list_layout.addStretch(1)
         self.list_area.setWidget(holder)
-        outer.addWidget(self.list_area, 1)
+
+        # A splitter rather than a fixed share: the map is the better view
+        # when several aircraft are moving and the list is the better one
+        # when a single distant aircraft is being coaxed in, and which of
+        # those is happening is not something this screen can know.
+        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split.addWidget(self.map)
+        self.split.addWidget(self.list_area)
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 2)
+        self.split.setChildrenCollapsible(True)
+        outer.addWidget(self.split, 1)
 
     # -- level -------------------------------------------------------------
 
@@ -188,6 +210,7 @@ class AircraftView(QWidget):
         if state is None:
             return
         self._show(state.aircraft)
+        self.map.show_aircraft(state.aircraft)
         self.status.setText(self._summary(state, receiving))
         self.empty.setText(WAITING if receiving else IDLE)
 
@@ -205,6 +228,13 @@ class AircraftView(QWidget):
         where = "Listening on 1090 MHz" if receiving else "Stopped"
         planes = "1 aircraft" if count == 1 else f"{count} aircraft"
         parts = [where, planes, f"{state.rate_per_minute:.0f} messages a minute"]
+        # Which of them are on the map, because the difference is a question
+        # the screen will otherwise be asked. An aircraft is heard several
+        # times before it has sent both halves of a position, and one that
+        # never sends a position at all is a normal thing to hear.
+        placed = self.map.plotted
+        if placed < count:
+            parts.append(f"{placed} on the map")
         if self.level >= Level.EXPERT and state.bad:
             # Bursts that looked like a message and failed their checkword.
             # A high count next to a low message rate is noise being tried
@@ -263,6 +293,7 @@ class AircraftView(QWidget):
         self._cards.clear()
         self._order = ()
         self.empty.setVisible(True)
+        self.map.clear()
 
 
 __all__ = ["AircraftView"]

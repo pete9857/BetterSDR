@@ -31,7 +31,34 @@ from .settings import _open_temporary, config_dir
 # a bin or two off, narrow enough not to merge adjacent FM channels.
 MATCH_TOLERANCE_HZ = 5_000.0
 
-CSV_COLUMNS = ("name", "frequency_hz", "mode", "bandwidth_hz", "group", "notes")
+CSV_COLUMNS = (
+    "name",
+    "frequency_hz",
+    "mode",
+    "bandwidth_hz",
+    "group",
+    "favourite",
+    "notes",
+)
+
+# What a CSV writes for a favourite, and everything a CSV may say to mean one.
+# Deliberately generous, for the same reason `from_csv` is generous about
+# everything else: somebody else's list is not going to spell it our way.
+TRUTHY = frozenset({"1", "true", "yes", "y", "on", "star", "favourite", "favorite"})
+
+
+def format_hz(hz: float) -> str:
+    """A frequency the way it should read on a button.
+
+    Shared with `history.py` so a station cannot be written one way in the
+    saved list and another in the recent one.
+    """
+    if hz >= 1_000_000:
+        # Trailing zeros trimmed off the number itself, not off the unit:
+        # rstripping the whole string would eat the "z" of "MHz" on a
+        # frequency that happened to end in one.
+        return f"{f'{hz / 1e6:.4f}'.rstrip('0').rstrip('.')} MHz"
+    return f"{hz / 1e3:.1f} kHz"
 
 
 @dataclass(frozen=True)
@@ -44,18 +71,17 @@ class Bookmark:
     bandwidth_hz: float = 200_000.0
     group: str = "General"
     notes: str = ""
+    # A favourite is a bookmark the user wants on the landing screen without
+    # opening a list to find it. It is a flag on the bookmark rather than a
+    # separate collection because a favourite that could go out of step with
+    # the entry it names - a different mode, a stale frequency - is two
+    # records of one thing, which is the fault this module exists to avoid.
+    favourite: bool = False
 
     @property
     def label(self) -> str:
         """`KUOW 94.9 MHz`, the way it should read on a button."""
-        hz = self.frequency_hz
-        if hz >= 1_000_000:
-            # Trailing zeros trimmed off the number itself, not off the unit:
-            # rstripping the whole string would eat the "z" of "MHz" on a
-            # frequency that happened to end in one.
-            shown = f"{f'{hz / 1e6:.4f}'.rstrip('0').rstrip('.')} MHz"
-        else:
-            shown = f"{hz / 1e3:.1f} kHz"
+        shown = format_hz(self.frequency_hz)
         return f"{self.name} - {shown}" if self.name else shown
 
     def matches(
@@ -96,6 +122,11 @@ class BookmarkStore:
     def in_group(self, group: str) -> list[Bookmark]:
         return [entry for entry in self.entries if (entry.group or "General") == group]
 
+    @property
+    def favourites(self) -> list[Bookmark]:
+        """The starred entries, in the order the list already holds them."""
+        return [entry for entry in self.entries if entry.favourite]
+
     def find(
         self, frequency_hz: float, tolerance_hz: float = MATCH_TOLERANCE_HZ
     ) -> Bookmark | None:
@@ -133,6 +164,20 @@ class BookmarkStore:
         updated = replace(bookmark, name=name)
         self.entries[self.entries.index(bookmark)] = updated
         return updated
+
+    def set_favourite(self, bookmark: Bookmark, favourite: bool = True) -> Bookmark:
+        """Star or unstar an entry, returning the entry that replaced it.
+
+        `Bookmark` is frozen, so this is a replacement rather than a mutation
+        and the caller has to take the value back - which is the point. A
+        stale copy held by a widget would show a star the list disagrees with.
+        """
+        updated = replace(bookmark, favourite=bool(favourite))
+        self.entries[self.entries.index(bookmark)] = updated
+        return updated
+
+    def toggle_favourite(self, bookmark: Bookmark) -> Bookmark:
+        return self.set_favourite(bookmark, not bookmark.favourite)
 
     def clear(self) -> None:
         self.entries.clear()
@@ -183,7 +228,12 @@ class BookmarkStore:
         writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, lineterminator="\n")
         writer.writeheader()
         for entry in self.entries:
-            writer.writerow({key: getattr(entry, key) for key in CSV_COLUMNS})
+            row = {key: getattr(entry, key) for key in CSV_COLUMNS}
+            # "yes" rather than "True": the column is meant to be readable in
+            # a spreadsheet and typeable by hand, which is the whole argument
+            # for CSV over SDR#'s XML.
+            row["favourite"] = "yes" if entry.favourite else ""
+            writer.writerow(row)
         return buffer.getvalue()
 
     def from_csv(self, text: str, merge: bool = True) -> int:
@@ -210,6 +260,7 @@ class BookmarkStore:
                     bandwidth_hz=_as_float(row.get("bandwidth_hz"), 200_000.0),
                     group=(row.get("group") or "General").strip() or "General",
                     notes=(row.get("notes") or "").strip(),
+                    favourite=(row.get("favourite") or "").strip().lower() in TRUTHY,
                 )
             )
             taken += 1
@@ -244,7 +295,9 @@ def from_signal(signal: object, group: str = "Found by scanning") -> Bookmark:
 __all__ = [
     "CSV_COLUMNS",
     "MATCH_TOLERANCE_HZ",
+    "TRUTHY",
     "Bookmark",
     "BookmarkStore",
+    "format_hz",
     "from_signal",
 ]
