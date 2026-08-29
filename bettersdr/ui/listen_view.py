@@ -41,6 +41,8 @@ from ..core.device import DEFAULT_SAMPLE_RATE
 from ..core.engine import DisplayFrame, Engine
 from ..core.frontend import SUPPORTED_SAMPLE_RATES, GainChoice
 from ..core.settings import Settings
+from ..decode import hdradio
+from ..decode.hdradio import HdProgram, HdState
 from ..decode.rds import RdsState
 from ..dsp import demod
 from ..dsp.features import detect_hd_radio
@@ -87,6 +89,7 @@ QLabel#hdBadge {
     color: #0b0e13; background: #5ad1ff; border-radius: 3px;
     padding: 1px 6px; font-weight: 600;
 }
+QLabel#hdStatus { color: #8b98a5; }
 QLabel#stereoBadge {
     color: #0b0e13; background: #7ee081; border-radius: 3px;
     padding: 1px 6px; font-weight: 600;
@@ -146,7 +149,21 @@ class ListenView(QWidget):
         # The last thing the station said about itself, kept so that
         # saving a frequency can name it without reading its own label.
         self._station: RdsState | None = None
+        # The best name anything has given for what is tuned - a callsign
+        # from RDS, or the station name off the digital signal - so saving a
+        # frequency can use it whichever decoder happened to find it.
+        self._station_name = ""
         self._manager: FrequencyManager | None = None
+        # Whether this build has an HD Radio decoder at all. Asked once: it
+        # is a look at the filesystem, and the answer cannot change while the
+        # app is running.
+        self._hd_available = hdradio.available()
+        # The programme list is kept here rather than read straight off each
+        # frame, because restarting the decoder to change subchannel empties
+        # it for a few seconds - and a list that vanished the moment it was
+        # used would be unusable.
+        self._hd_programs: tuple[HdProgram, ...] = ()
+        self._hd_labels: list[str] = []
 
         self._build()
         self._restore()
@@ -267,6 +284,35 @@ class ListenView(QWidget):
         self.mute = QCheckBox("Mute")
         self.mute.toggled.connect(self.engine.set_mute)
         section.add_wide(self.mute)
+
+        # HD Radio lives in Audio rather than in Radio, because that is what
+        # it is from where the listener sits: a choice about what comes out
+        # of the speakers. Everything it does to the receiver - a window
+        # nothing else uses, its own gain, no demodulator at all - is the
+        # engine's business, not theirs.
+        self.hd = QCheckBox("HD Radio")
+        self.hd.setToolTip(
+            "Many FM stations also broadcast a digital copy of themselves, "
+            "and often one or two extra stations alongside it. It sounds "
+            "clearer and takes a few seconds to find. Stations that do not "
+            "carry it simply keep playing normally."
+        )
+        self.hd.toggled.connect(self._hd_toggled)
+        section.add_wide(self.hd, Level.SIMPLE)
+
+        self.hd_program = QComboBox()
+        self.hd_program.setToolTip(
+            "The extra stations this one carries. Switching takes the same "
+            "few seconds as turning HD Radio on, because the digital signal "
+            "has to be found again."
+        )
+        self.hd_program.currentIndexChanged.connect(self._hd_program_changed)
+        section.add_wide(self.hd_program, Level.SIMPLE)
+
+        self.hd_status = QLabel("")
+        self.hd_status.setObjectName("hdStatus")
+        self.hd_status.setWordWrap(True)
+        section.add_wide(self.hd_status, Level.SIMPLE)
 
         self.audio_device = QComboBox()
         self.audio_device.addItem("System default", None)
@@ -608,6 +654,7 @@ class ListenView(QWidget):
         # The panel shows every row that belongs at the new level, including
         # the ones this view hides for having nothing to say.
         self._refresh_recording()
+        self._refresh_hd(self.engine.latest())
 
     # -- remembered settings -----------------------------------------------
 
@@ -645,6 +692,7 @@ class ListenView(QWidget):
         self.ppm.setValue(int(settings["ppm"]))
         self.rds.setChecked(bool(settings["rds"]))
         self.stereo.setChecked(bool(settings["stereo"]))
+        self.hd.setChecked(bool(settings["hd"]) and self._hd_available)
 
     def remember(self) -> None:
         """Write the display choices back. Called when the window closes."""
@@ -665,6 +713,7 @@ class ListenView(QWidget):
             ppm=self.ppm.value(),
             rds=self.rds.isChecked(),
             stereo=self.stereo.isChecked(),
+            hd=self.hd.isChecked(),
             frequency_hz=self.frequency.value_hz,
             mode=self.mode.currentData(),
         )
@@ -673,6 +722,7 @@ class ListenView(QWidget):
     # -- control handlers --------------------------------------------------
 
     def _tune(self, hz: int) -> None:
+        self._forget_station()
         self.engine.tune(int(hz))
         self.spectrum.reset_peak_hold()
         self._update_band_label(hz)
@@ -752,6 +802,7 @@ class ListenView(QWidget):
         saved with, not as whatever the band it sits in usually carries.
         """
         self.frequency.set_value(hz)
+        self._forget_station()
         self.engine.tune(hz)
         self.spectrum.reset_peak_hold()
         self._update_band_label(hz)
@@ -849,6 +900,130 @@ class ListenView(QWidget):
             slope_db=self.agc_slope.value(),
             use_hang=self.agc_hang.isChecked(),
         )
+
+    # -- HD Radio ----------------------------------------------------------
+
+    def _hd_toggled(self, on: bool) -> None:
+        self.engine.set_hd(on)
+        self._refresh_hd(self.engine.latest())
+
+    def _hd_program_changed(self) -> None:
+        index = self.hd_program.currentData()
+        if index is not None:
+            self.engine.set_hd_program(int(index))
+
+    def _forget_station(self) -> None:
+        """Drop what the last station said about itself, before leaving it.
+
+        The subchannel list is the part that matters: HD2 on this station has
+        nothing to do with HD2 on the next one, and a stale list would offer
+        programmes that are not there - which costs twelve seconds of silence
+        to find out. The name goes with it because a bookmark saved on the
+        new frequency must not be named after the old one, and during an HD
+        session the RDS receiver is not running to correct it.
+        """
+        self._hd_programs = ()
+        self._hd_labels = []
+        self._station = None
+        self._station_name = ""
+
+    def _hd_offered(self) -> bool:
+        """Whether the switch is worth showing at all right now.
+
+        Two separate questions. Whether this build has a decoder is answered
+        once, at startup. Whether the band could carry HD is answered every
+        time the radio moves: NRSC-5 is an FM broadcast standard, so a switch
+        offered on the airband would be a control that can only ever fail,
+        and offering one of those is worse than not having the feature.
+        """
+        if not self._hd_available:
+            return False
+        if self.mode.currentData() != "wfm":
+            return False
+        band = bandplan.find(self.engine.center_hz)
+        return band is not None and band.mode == "wfm"
+
+    def _refresh_hd(self, frame: DisplayFrame | None) -> None:
+        """Follow the engine rather than assume the switch is the truth.
+
+        A session ends itself when the station turns out not to carry HD, and
+        a switch left on over that would be the app claiming to be playing a
+        digital broadcast that was never there.
+        """
+        offered = self._hd_offered()
+        self.hd.setVisible(offered)
+        if self.hd.isChecked() != self.engine.hd_enabled:
+            self.hd.blockSignals(True)
+            self.hd.setChecked(self.engine.hd_enabled)
+            self.hd.blockSignals(False)
+
+        state = None if frame is None else frame.hd
+        if state is not None and state.programs:
+            # Only ever replaced by a longer answer. A restart empties the
+            # list for a few seconds and the user is most likely reaching for
+            # it exactly then.
+            self._hd_programs = state.programs
+        self._sync_hd_programs(state)
+        # Gated on the switch, not on there being a session: it has to stay
+        # put across the restart that changing subchannel costs, and it has
+        # to go away when HD is off, where picking an entry would do nothing
+        # anybody could see.
+        self.hd_program.setVisible(
+            offered and self.engine.hd_enabled and len(self._hd_programs) > 1
+        )
+
+        self.hd_status.setText(self._hd_status_text(state))
+        # Hidden rather than blank: an empty word-wrapping label still takes
+        # a row, and a gap under the switch reads as something missing.
+        self.hd_status.setVisible(offered and bool(self.hd_status.text()))
+
+    def _sync_hd_programs(self, state: HdState | None) -> None:
+        """Rebuild the subchannel list, but only when it has actually changed.
+
+        Rebuilt on every frame it would fight the user, who is trying to open
+        it thirty times a second.
+        """
+        labels = [self._hd_program_label(program) for program in self._hd_programs]
+        wanted = self.engine.hd_program
+        if labels != self._hd_labels:
+            self._hd_labels = labels
+            self.hd_program.blockSignals(True)
+            self.hd_program.clear()
+            for program, label in zip(self._hd_programs, labels, strict=True):
+                self.hd_program.addItem(label, program.index)
+            self.hd_program.blockSignals(False)
+        index = self.hd_program.findData(wanted)
+        if index >= 0 and index != self.hd_program.currentIndex():
+            self.hd_program.blockSignals(True)
+            self.hd_program.setCurrentIndex(index)
+            self.hd_program.blockSignals(False)
+
+    @staticmethod
+    def _hd_program_label(program: HdProgram) -> str:
+        """What a car radio would show, plus whatever the station added.
+
+        nrsc5 prints "None" for a programme that declared no type, which is a
+        name for the absence of one rather than a genre - so a programme with
+        nothing to say about itself is just "HD2".
+        """
+        parts = [program.label]
+        if program.kind:
+            parts.append(program.kind)
+        if program.restricted:
+            # Subscription-only. Shown rather than hidden, because a listener
+            # who picks it and gets silence deserves to have been told why.
+            parts.append("subscription only")
+        return " - ".join(parts)
+
+    def _hd_status_text(self, state: HdState | None) -> str:
+        message = self.engine.hd_message
+        if message:
+            return message
+        if state is None or not state.running:
+            return ""
+        if state.playing:
+            return ""
+        return "Finding the HD Radio signal..."
 
     # -- bias tee ----------------------------------------------------------
 
@@ -993,7 +1168,8 @@ class ListenView(QWidget):
         # first because it is the part that will still be true tomorrow - the
         # name field was reading "BBC News" when this was written.
         rds = self._station
-        station = "" if rds is None else (rds.callsign or rds.name)
+        station = "" if rds is None else rds.callsign
+        station = station or self._station_name
         self.bookmarks.add(
             Bookmark(
                 name=station or (self.band_name.text() if band else ""),
@@ -1090,6 +1266,7 @@ class ListenView(QWidget):
             self._fit_waterfall_range(frame.spectrum_db)
 
         if self._frames % SLOW_TICK == 0:
+            self._refresh_hd(frame)
             self._update_hd_badge(frame)
             self.stereo_badge.setVisible(frame.stereo)
             self._refresh_recording()
@@ -1105,6 +1282,19 @@ class ListenView(QWidget):
             parts.append(f"AGC {frame.agc_gain_db:+.0f} dB")
         if self.engine.front.noise_blanker:
             parts.append(f"blanked {self.engine.front.blanked_samples}")
+        hd = frame.hd
+        if hd is not None:
+            # MER and BER are for the carrier as a whole, not for the
+            # programme being listened to - nrsc5 filters the title and the
+            # bit rate but not these. Below about 9 dB of MER the audio
+            # starts dropping out, which makes it the number worth watching.
+            parts.append("HD sync" if hd.synced else "HD searching")
+            if hd.mer_db is not None:
+                parts.append(f"MER {hd.mer_db:.0f} dB")
+            if hd.ber is not None:
+                parts.append(f"BER {hd.ber:.1e}")
+            if hd.bit_rate_kbps is not None:
+                parts.append(f"{hd.bit_rate_kbps:.0f} kbps")
         self.status.setText("   ".join(parts))
         self._update_station(frame)
         self.imbalance_readout.setText(
@@ -1120,17 +1310,29 @@ class ListenView(QWidget):
         simply too weak to decode looks exactly like one that sends nothing,
         and inventing a placeholder for either would be claiming knowledge the
         receiver does not have.
+
+        The digital signal wins where there is one. It is the same station
+        saying the same things over a channel with a checkword on it, and
+        during a session the analog receiver is not running at all - so
+        anything RDS had to say is minutes old.
         """
+        hd = frame.hd
+        if hd is not None and hd.running:
+            self._show_station(hd.name, hd.label, hd.track or hd.slogan)
+            return
         rds = self._station = frame.rds
         name = "" if rds is None else rds.name
-        if name:
+        detail = ""
+        if rds is not None:
             traffic = "Traffic" if rds.traffic_announcement else ""
-            detail = " - ".join(
-                part for part in (rds.pty_name, traffic) if part
-            )
+            detail = " - ".join(part for part in (rds.pty_name, traffic) if part)
+        self._show_station(name, detail, "" if rds is None else rds.text)
+
+    def _show_station(self, name: str, detail: str, text: str) -> None:
+        if name:
             self.station_name.setText(f"{name}   {detail}" if detail else name)
+            self._station_name = name
         self.station_name.setVisible(bool(name))
-        text = "" if rds is None else rds.text
         self.station_text.setText(text)
         self.station_text.setVisible(bool(text))
 
@@ -1152,6 +1354,22 @@ class ListenView(QWidget):
         actually reaches past the sidebands - `detect_hd_radio` refuses rather
         than guessing, and a refusal is not a reason to bother the user.
         """
+        hd = frame.hd
+        if hd is not None and hd.running:
+            # A running session is better evidence than any measurement of
+            # the picture: the sidebands are not merely present, they are
+            # being decoded. The badge names the subchannel while it is,
+            # which is the only place on screen that says which of a
+            # station's programmes is playing.
+            self.hd_badge.setText(hd.label if hd.playing else "HD")
+            self.hd_badge.setToolTip(
+                f"Playing the digital {hd.label} programme."
+                if hd.playing
+                else "Looking for the digital signal."
+            )
+            self.hd_badge.setVisible(True)
+            return
+        self.hd_badge.setText("HD")
         band = bandplan.find(frame.center_hz)
         if band is None or band.mode != "wfm":
             self.hd_badge.setVisible(False)

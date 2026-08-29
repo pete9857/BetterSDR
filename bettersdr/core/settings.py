@@ -68,6 +68,11 @@ DEFAULTS: dict[str, Any] = {
     # off did so for a reason.
     "rds": True,
     "stereo": True,
+    # Off by default: an HD session takes a few seconds to find the digital
+    # signal, and a first-time user pressing play should hear something
+    # immediately. Remembered because somebody who turned it on wants it on
+    # every station that carries it, not on the one they pressed it on.
+    "hd": False,
     # Display. These are the SDR# parity controls; all are safe to restore
     # because none of them can put the radio into a state that needs rescuing.
     "fft_size": 4096,

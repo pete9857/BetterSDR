@@ -314,6 +314,33 @@ checklist rather than assuming.
   does not use the checkword's error-correcting capability, and it does not
   decode altitudes above 50,000 ft, where the encoding changes to one there is
   no way to check against real air.
+- **HD Radio (NRSC-5)** → the digital programme, and the extra stations
+  beside it.
+
+  **Status: complete and verified on hardware, 2026-08-28.**
+  `decode/hdradio.py` runs the bundled `vendor/nrsc5/win-x64/nrsc5.exe` as a
+  child process - `cu8` down its stdin untouched, 44.1 kHz audio up its
+  stdout resampled to 48, station metadata off its stderr - and
+  `Engine.set_hd` is a standing wish that starts a session on every station
+  that carries one and hands the station back to the analog receiver after 12
+  seconds on every station that does not. The switch and the subchannel list
+  live in the Audio section at Simple.
+
+  It cost two things the plan did not anticipate. A session runs at a window
+  **no demodulator can be built for**, so the analog path is not merely
+  bypassed but absent. And `rtlsdr_read_sync` cannot carry OFDM at all: the
+  gap between one read and the next took MER from +10 dB to -13 and left the
+  decoder with no audio, so `Reader` grew a gapless mode used only while HD
+  holds the radio. Both are in **Amendment 10**, with the measurements.
+
+  Off air: **MER +8 to +12.5 dB and 92 kbps** on local stations, seven of
+  eight carrying HD and five of them carrying an HD2, and **0 audio underruns
+  and 0 ring overruns** across a sweep, an aircraft excursion and a programme
+  change.
+
+  One thing it deliberately does not do: change programme without restarting
+  the decoder. nrsc5 takes that only as a console keypress, which a pipe
+  cannot deliver, so HD1 to HD2 costs the acquisition again.
 - POCSAG → pager text. A strong "look what's out there" demo.
 - Favourites, recently played, session history.
 
@@ -586,6 +613,12 @@ committing to any tighter coupling.**
 It fits the existing architecture well. The reader thread already owns the
 device and writes `uint8` IQ into a ring buffer; HD mode adds a second consumer
 of that ring alongside the demodulator, rather than a second device owner.
+
+> **Amendment 10 corrects the last clause.** It is not a second consumer
+> alongside the demodulator: at 1,488,375 S/s there *is* no demodulator, so an
+> HD session replaces the analog path rather than running beside it. The
+> reader also turned out to need a second reading mode - `read_sync` does not
+> deliver a stream an OFDM receiver can decode.
 
 ## Two constraints to design around
 
@@ -1005,7 +1038,8 @@ bookmark named `KUOW`.
   will.
 - **Group 4A clock time, and alternate frequencies (0A blocks C/D).** Both are
   small additions to `RdsDecoder.update`.
-- **HD Radio and POCSAG**, and favourites/recently-played, all untouched.
+- **POCSAG**, and favourites/recently-played, all untouched. HD Radio
+  shipped; see **Amendment 10**.
 - **A map for the aircraft screen.** Positions are decoded and shown as
   numbers; a map is the obvious next step and is a self-contained piece of
   work. Nothing else needs it.
@@ -1247,3 +1281,181 @@ function tested without a window, and an aircraft that has not said something
 gets no line for it rather than a zero. A vertical rate under 200 ft/min is
 not called a climb, because otherwise every aircraft on the screen is
 permanently climbing and the word stops meaning anything.
+
+## Amendment 10 — HD Radio in the app, and the one thing `read_sync` cannot carry (2026-08-28)
+
+`decode/hdradio.py` was finished and passing its tests against nrsc5's own
+sample recording before any of this. Wiring it in was expected to be a third
+copy of the ADS-B excursion. It was not, and the reason is a single sentence
+that invalidates a line in Amendment 3: **reading the dongle one block at a
+time does not deliver a signal an OFDM receiver can decode.**
+
+### The switch is a standing wish, not a command
+
+"Play the digital version" is not a per-station decision the way a mode is.
+Somebody who wants HD wants it on every station that has one, so
+`Engine.hd_enabled` is a wish and the engine starts and stops sessions to
+match it: on a retune, on a mode change, on the way back from a sweep or the
+aircraft screen. `_apply_hd` recomputes whether a session is possible rather
+than remembering, because every input to that question can change underneath
+it.
+
+The corollary is the part that makes it usable. A station that turns out not
+to carry HD, or carries it too weakly to decode indoors, gets **12 seconds**
+and is then handed back to the analog receiver with a line saying so — the
+switch stays on for the next station. Acquisition measured 3–5 seconds on a
+strong local signal and 5.5 on the recording, so 12 is comfortably clear of a
+station that is going to work. Without this, leaving the switch on and tuning
+to 100.7 would be a radio that is simply silent, which is exactly the kind of
+dead end this app exists to not have.
+
+### The third borrower, and the first that does not go anywhere
+
+A sweep and the aircraft screen both take the tuner somewhere else. HD rides
+on the same carrier as the analog broadcast, so it borrows the **window** and
+nothing else: `center_hz` never moves, and the display frame is labelled with
+the frequency the listener is actually on. What it borrows is stranger than a
+frequency, though. 1,488,375 S/s is fixed by the standard and is not a whole
+multiple of 48 kHz, so for the length of a session **there is no demodulator
+at all** — `demod.create` refuses that rate by design, and rightly, so
+`_rebuild` has to not ask. A mode or bandwidth chosen during a session is
+remembered on `_wanted_mode` and `_wanted_bandwidth_hz` and applied when the
+window comes back, which is also the moment the analog path exists again.
+
+Amendment 3 said HD mode "adds a second consumer of that ring alongside the
+demodulator". It does not. It **replaces** the demodulator, because at that
+window there is nothing to run.
+
+Two smaller things had to be put away for the duration. Offset tuning, because
+the decoder is fed the raw bytes ahead of the front-end chain and a shift
+applied in software never reaches it — nrsc5 would be handed a station a few
+hundred kHz off the middle of its window. And the window control itself: there
+is exactly one rate nrsc5 accepts, so a request during a session is read as a
+statement of what to come back to. That last one is not hypothetical —
+`_guard_window` re-asserts the current rate on every retune, and taken
+literally it would have narrowed a listener's 2.4 MS/s to 1.44 the moment they
+moved the dial.
+
+### The finding: `rtlsdr_read_sync` leaves a gap, and OFDM cannot cross it
+
+The first session on air synchronised, read the station name off the air, and
+produced **no audio at all**, at a modulation error ratio of −13 to −17 dB.
+nrsc5 driving the same dongle itself, minutes apart, gave **+10.8 dB and
+91.8 kbps**.
+
+Gain was the obvious suspect and was wrong. A sweep of the whole tuner table
+against a real decode — eight settings from 2.7 to 40.2 dB — never produced a
+usable MER at any of them. Neither did capturing to a file and decoding it
+offline, which is what located the fault: the capture itself was bad, at
+99.84% of real time with **zero ring overruns**. Nothing was being dropped by
+us. The samples were missing at the source.
+
+Between two `rtlsdr_read_sync` calls there is no USB transfer in flight. That
+gap is the reason `Reader` uses a large read size at all, and until now the
+whole cost of it was a fraction of a percent of samples — inaudible on any
+analog mode, invisible to the scanner, irrelevant to ADS-B, all of which work
+a block at a time and start each one fresh. An OFDM receiver tracks a frame
+*across* blocks, so what matters is not the fraction lost but **how often the
+stream is discontinuous**. Raising the read size to 1 MB (352 ms) took MER
+from −17 dB to +6.3 and still lost sync five times in fifteen seconds; the
+capture percentage was 100.06% at both sizes and said nothing about either.
+
+`rtlsdr_read_async` keeps several transfers queued, so there is never a moment
+with nothing in flight. Same station, same gain, same rate, nothing else
+changed: **+9 to +10 dB, 91.8 kbps, no loss of sync in fifteen seconds.**
+
+So `Reader` grew a second mode. It is used only while HD Radio holds the
+radio, because the block-at-a-time loop is what gives the scanner a
+synchronous point to retune at and that is worth keeping. The callback
+librtlsdr delivers transfers to runs on the reader thread, so `Device` still
+has exactly one owner and `tests/test_reader.py` still holds.
+
+### The trap inside that: libusb is not reentrant
+
+The first version drained the command queue from inside the read callback,
+which looks like the natural place — it is the reader thread, and it is
+between transfers. It is not. A control transfer issued from within libusb's
+own event handling comes back `LIBUSB_ERROR_BUSY`, which librtlsdr reports as
+`r82xx_set_freq: failed=-6` and then carries on regardless. The result is a
+radio that **did not retune** and a decoder cheerfully reporting the station
+it was already on. Found by surveying eight local frequencies and reading the
+same call letters off all eight.
+
+A pending command therefore ends the stream, `run` handles it the ordinary way
+outside `read_async`, and streaming is entered again afterwards. That costs a
+discontinuity per command, which is affordable because nothing queues commands
+during a settled session — and the one thing that does, a retune, restarts the
+decoder anyway.
+
+### The acquisition gap, and one underrun count that lied
+
+There is nothing to play for the first few seconds. A real HD receiver covers
+it by playing the analog signal and blending, and we cannot: at 1,488,375 S/s
+there is no analog path to blend from. So the sink is parked until the first
+digital audio arrives, once, in one direction. Parking it again on every
+drop-out was rejected — reopening the sound card at every flutter puts a gap
+in the audio in exactly the conditions that least need one, and a mid-session
+drop-out is the signal genuinely going away, which is worth seeing.
+
+Wiring that up exposed an older fault with a wider blast radius than HD.
+`_apply_sample_rate` stops and restarts the sink, and said nothing about it to
+the parking bookkeeping — so a rate change *inside* a parked stretch left
+`_run` believing the audio was still parked, and it therefore never parked it
+again. Coming back from the aircraft screen into an HD session does exactly
+that, and the sink played into the gain probe and the whole acquisition:
+**162 underruns**, against 0 with the flag corrected at its source. The same
+latent bug was reachable without HD at all, on the way back from aircraft
+tracking to an AM station, where the two windows also differ.
+
+### The screen
+
+The switch lives in **Audio**, not in Radio, and at Simple. From where the
+listener sits that is what it is — a choice about what comes out of the
+speakers — and everything it does to the receiver is the engine's business.
+It is offered only where it could work: a build with the decoder bundled, on a
+band the plan says is broadcast FM, in `wfm`. A control that can only ever
+fail is worse than no control.
+
+Underneath it, the subchannel list, which is most of the reason to want the
+feature: `HD2 — Jazz`, `HD3 — Talk`. It appears only when a station announces
+more than one, it is rebuilt only when the labels actually change rather than
+thirty times a second under the cursor, and the last list is kept across a
+restart because changing subchannel empties it for a few seconds — precisely
+when somebody is reaching for it. A restricted programme is labelled
+`subscription only` rather than hidden. The subchannel does not survive a
+retune: HD2 on one station has nothing to do with HD2 on the next, and asking
+for one that is not there costs twelve seconds of silence to discover.
+
+The digital signal wins over RDS while a session runs — it is the same station
+saying the same things over a channel with a checkword on it, and the analog
+receiver is not running to contradict it. The badge names the programme
+(`HD2`) instead of just lighting, which is the only place on screen that says
+which of a station's broadcasts is playing, and the passband marker widens to
+the full 396 kHz of the hybrid signal, which is the clearest explanation the
+display can give of where the extra sound is coming from.
+
+### Verified on hardware, 2026-08-28
+
+Through the app, on KUOW 94.9: first digital audio at **5.0 s**, MER **+8.0
+dB**, **92.1 kbps** against the analog-equivalent 64, title `BBC World
+Service`, artist `Seattle's NPR News Station`, no loss of sync in 21 seconds,
+**0 dropped IQ blocks, 0 audio underruns, 0 ring overruns** including both
+transitions.
+
+Eight local FM stations surveyed at 15 s each, all decoding: **KNKX 88.5**
+(HD1 Public, HD2 Jazz), **JACK 96.5** (HD1 Adult Hits, HD2 Rock, HD3 Talk),
+**KING-FM 98.1** (HD1, HD2 and HD3 Classical), **KZOK 102.5** (HD1 Classic
+Rock, HD2 Top 40), **KNDD 107.7** (HD1, HD2), **KHTP 103.7** and **KUOW 94.9**
+(HD1 only). 100.7 carries no HD and fell back to the analog broadcast on its
+own, which is the intended answer rather than a failure.
+
+Switching programmes on KNKX 88.5 at MER +12.5 dB: HD1 playing `E.S.T. — Did
+They Ever Tell Cousteau`, HD2 playing `Bill Evans — Waltz For Debby`, and back
+again, at 3.0–4.0 s of acquisition each way and **0 underruns**.
+
+And against the other two borrowers, from an HD session: a full 88–108 MHz
+sweep (45 signals) and an aircraft excursion, both returning to HD playing at
+MER +12.2, then off to a stereo FM station with its RDS name intact — **0
+underruns and 0 ring overruns end to end**.
+
+---

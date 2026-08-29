@@ -21,7 +21,7 @@ Full roadmap and phase breakdown: **[docs/PLAN.md](docs/PLAN.md)**.
 | **1 — Listen** (demod, audio, spectrum/waterfall) | **Complete and verified on hardware** |
 | **2 — Discovery** (sweep, detect, classify) | **Complete and verified on hardware** |
 | **3 — SDR# parity** | **Complete and verified on hardware** (small gaps and untested paths listed in docs/PLAN.md) |
-| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo and ADS-B complete and verified on hardware** (ADS-B: engine, aircraft screen and a real sky, 2026-08-28); HD Radio and POCSAG not started |
+| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo, ADS-B and HD Radio complete and verified on hardware** (HD Radio: engine, UI and seven local stations, 2026-08-28); POCSAG not started |
 | **5 — Packaging** | Not started |
 
 ### Driver state on this machine
@@ -170,6 +170,153 @@ sections: don't re-derive them. Full reasoning in **Amendment 3** of docs/PLAN.m
   IQ to **nrsc5 as a child process** rather than reimplement NRSC-5 - the HDC
   codec is proprietary with no public spec, and the subprocess boundary keeps
   its GPL lineage from dictating terms for the whole app.
+
+Measured on 2026-08-28 while building `decode/hdradio.py`, against nrsc5's own
+sample recording of KUT Austin. Same rule. (It is wired into the engine and
+the UI now; the block after this one is what that cost.)
+
+- **The bundled binary is one self-contained file.** Built with
+  `USE_STATIC=ON`, it imports nothing but Windows system DLLs - verified with
+  `ldd` and by running it with only `C:\WINDOWS\system32` on PATH. No mingw
+  runtime, no `libnrsc5.dll`. MSVC **cannot** build it; the toolchain is
+  MSYS2, and it must build from a short path or faad2's nested try-compile
+  directories overflow `MAX_PATH` and report a missing object file instead.
+- **The process boundary is a licensing requirement, not a convenience.**
+  Aggregation over pipes leaves BetterSDR's licence alone; loading
+  `libnrsc5` in-process would be linking and would place the whole app under
+  GPL-3. Amendment 3 chose the subprocess for codec and crash-isolation
+  reasons - this is the third and hardest one. BetterSDR still has no
+  `LICENSE` file, which is the field this turns on at Phase 5.
+- **The IQ needs no conversion whatsoever.** `cu8` on nrsc5's stdin is byte
+  for byte what the reader thread already puts in the ring buffer, so `feed`
+  passes the block straight through.
+- **The pipe cannot be written from the DSP thread.** A write to a full pipe
+  waits for the far end, and that is the radio stopping. A writer thread does
+  the blocking behind a bounded queue that drops the *oldest* IQ, same policy
+  as the ring buffer. Measured: `feed` returns in **0.87 ms** worst case for
+  a 64 KB block, and `stop` completes in **2-4 ms** with every thread joined
+  and no process left behind, even mid-audio.
+- **Audio comes back at 44,100 Hz**, signed 16-bit stereo interleaved, so it
+  needs a real resampler - `ClockSync`'s ±0.5% drift correction is a
+  different job. `filters.RationalResampler` does 160/147 for **0.8 ms per
+  second of stereo audio**, flat to 19 kHz with everything it invents more
+  than 60 dB down and above hearing.
+- **A rational resampler must carry the remainder as well as the filter
+  history.** Only whole groups of `down` input samples can be converted, and
+  an early version kept the overlap and dropped the rest - a fraction of a
+  block every block. There is no gap to hear; the audio just runs slowly out
+  of time with the radio.
+- **Acquisition takes 5.5 seconds before the first audio sample**, measured
+  repeatedly on a strong signal. That is nrsc5 finding the OFDM frame, not
+  our plumbing, and it is why a real HD receiver plays the analog signal and
+  blends. We cannot do that at 1,488,375 S/s - the analog path needs a whole
+  multiple of 48 kHz - so whatever the engine does with those five seconds is
+  a design decision, not an implementation detail.
+- **The station tells you which programmes it carries.** `Audio service N`
+  lines enumerate them with an access flag; KUT announces HD1 and HD2. nrsc5
+  prints `type: None` for a programme that declared no type, which is a name
+  for the absence of one and not a genre.
+- **The programme cannot be changed without restarting the decoder.** nrsc5
+  only takes that as a console keypress, which a pipe cannot deliver, so
+  switching HD1 to HD2 costs the 5.5 s acquisition again.
+- **Title, artist and bit rate are filtered to the selected programme by
+  nrsc5 itself**, but MER, BER and sync are for the carrier as a whole.
+
+Measured on 2026-08-28 wiring `decode/hdradio.py` into the engine and the
+listening screen. Same rule; the feature ships and is verified on air. Full
+reasoning in **Amendment 10** of docs/PLAN.md.
+
+- **`rtlsdr_read_sync` cannot carry OFDM, and this is the finding the whole
+  feature turned on.** The first session on air synchronised, read the
+  station name off the air and produced **no audio**, at MER **-13 to
+  -17 dB**; nrsc5 driving the same dongle itself gave **+10.8 dB and
+  91.8 kbps** minutes apart. Gain was not it - a sweep of all 29 tuner
+  settings against a real decode failed at every one of them. Capturing to a
+  file and decoding it offline is what located the fault: the capture was bad
+  at **99.84% of real time with zero ring overruns**, so nothing was being
+  dropped by us. Between two reads no USB transfer is in flight. Switching to
+  `rtlsdr_read_async`, nothing else changed, gave **+9 to +10 dB, 91.8 kbps
+  and no loss of sync in fifteen seconds**.
+- **The capture percentage cannot see this.** 256 KB reads and 1 MB reads both
+  measured **100.06%**, and decoded at **-17 dB** and **+6.3 dB** respectively.
+  What matters to a frame-tracking receiver is how often the stream is
+  discontinuous, not what fraction of it is missing.
+- **No device call may be made from inside the read callback.** libusb is not
+  reentrant: a control transfer issued from within its own event handling
+  returns `LIBUSB_ERROR_BUSY`, which librtlsdr prints as `r82xx_set_freq:
+  failed=-6` and then carries on. The radio does not retune and the decoder
+  reports the station it was already on - found by surveying eight local
+  frequencies and reading the same call letters off all eight. A pending
+  command ends the stream instead, and `Reader.run` handles it outside
+  `read_async`.
+- **An HD session has no demodulator, not merely an unused one.**
+  `demod.create` refuses 1,488,375 S/s by design, so `_rebuild` must not ask.
+  A mode or bandwidth chosen during a session lives on `_wanted_mode` and
+  `_wanted_bandwidth_hz` until the window comes back.
+- **Offset tuning has to be put away for the session.** The decoder is fed the
+  raw ring bytes ahead of the front-end chain, so a shift applied in software
+  never reaches it - nrsc5 would be handed a station a few hundred kHz off the
+  middle of its own window.
+- **`_guard_window` would have stolen the listener's window.** It re-asserts
+  the current rate on every retune, and during a session that is the HD rate,
+  which `safe_sample_rate` narrows to 1.44 MS/s. A window request during a
+  session is a statement of what to come back to, not a request to change
+  anything.
+- **`_apply_sample_rate` restarting the sink without saying so cost 162
+  underruns.** A rate change inside a parked stretch left `_run` believing the
+  audio was still parked, so it never parked it again and the sink played
+  through the gain probe and the whole acquisition. Reachable without HD too,
+  coming back from aircraft tracking to an AM station. The flag is now set
+  where the sink is actually started.
+- **Acquisition is 3-5 seconds on a strong live signal**, against the 5.5 s
+  measured on the recording. The sink is parked until the first digital audio
+  and then left open: a mid-session drop-out is the signal going away, and
+  reopening the sound card at every flutter would put a gap in the audio in
+  exactly the conditions that least need one.
+- **A station that has no HD must hand itself back.** 12 seconds, then the
+  analog broadcast returns and the switch stays on for the next station.
+  Without it, leaving the switch on and tuning to a station with no HD is a
+  radio that is simply silent.
+- **nrsc5's audio arrives in lumps, and the lump size is the jitter buffer's
+  problem.** At 93 ms a chunk the buffer ran **168-273 ms** against a 150 ms
+  target; at 46 ms it runs **174-210 ms**.
+- **Seven of eight local FM stations decode, and five carry an HD2.** KNKX
+  88.5 (HD1 Public, HD2 Jazz), JACK 96.5 (HD1, HD2 Rock, HD3 Talk), KING-FM
+  98.1 (HD1, HD2 and HD3 Classical), KZOK 102.5 (HD1 Classic Rock, HD2 Top
+  40), KNDD 107.7, KHTP 103.7 and KUOW 94.9. **92 kbps** where the analog
+  equivalent is 64. Programme names come from the per-programme *type*, not
+  from SIG - `SIG Service` lines carry a station-assigned service number that
+  does not map to the programme index, and none arrived in 33 seconds anyway.
+- **Measured end to end:** first audio 5.0 s, MER +8.0 dB, 92.1 kbps, 0
+  dropped IQ blocks, **0 audio underruns and 0 ring overruns** across an FM
+  sweep, an aircraft excursion, an HD1/HD2/HD1 switch and the way back to a
+  stereo station with its RDS intact.
+
+Checked on 2026-08-28, prompted by "some stations that I know have
+substations don't show them, like 103.7". Not acted on beyond the note.
+
+- **103.7 KHTP carries HD and announces only one programme, so the app is
+  right about it.** The digital sidebands in the waterfall are real and it
+  decodes well - MER +7.7 dB, 96.2 kbps, HD1 playing. But its SIS emits only
+  `Audio program 0` / `Audio service 0`, its SIG lists a single audio service
+  whose name is literally `HD-1`, its Slogan is also `HD-1`, and asking nrsc5
+  for program 1 directly produced **zero bytes of audio in 60 seconds**.
+  Confirmed twice over: nrsc5 driving the dongle itself and the same
+  frequency through the app agree line for line. Contrast KNKX 88.5, which
+  announces `Audio service 0: public, type: Public` and `Audio service 1:
+  public, type: Jazz` within seconds.
+- **This nrsc5 build prints two enumerations and they are not the same
+  thing.** `Audio program N:` is the SIS list; `Audio service N:` carries the
+  per-service codec, blend, gain and latency. Both enumerate every programme,
+  and `decode/hdradio.py` parses the second - which is fine, but it is one
+  source, not two.
+- **A `SIG Service` line's *number* does not map to the programme index, but
+  its nested `Audio component: port` does.** KNKX's two services carry
+  `port=0000` and `port=0001`. This corrects the note above that SIG is
+  unusable for this - it is a viable second source of the programme list, and
+  its `name` field is a real name where the type is `None`. Untested as a
+  fallback because no local station was found where SIS and SIG disagree; SIG
+  also arrives once and late (45-75 s) against SIS's few seconds.
 
 ## HF and sample-rate facts
 
@@ -659,7 +806,8 @@ bettersdr/
     device.py     Device class + `--info` CLI
     doctor.py     driver diagnosis via cfgmgr32 (no UI, no PowerShell)
     ringbuffer.py preallocated SPSC byte ring; drops oldest, never blocks
-    reader.py     the reader thread + its device-command queue
+    reader.py     the reader thread + its device-command queue; the
+                  gapless streaming mode HD Radio needs
     frontend.py   gain selection, safe_sample_rate, safe_center_hz
     engine.py     the DSP thread, device ownership, single-slot mailbox
     settings.py   persisted preferences, atomic JSON, defaults on any fault
@@ -667,8 +815,8 @@ bettersdr/
     calibrate.py  ppm measurement against a known carrier
   dsp/
     convert.py    uint8 -> complex64 LUT
-    filters.py    streaming FIR decimation, de-emphasis, discriminator,
-                  squelch, audio band-pass
+    filters.py    streaming FIR decimation, rational resampling,
+                  de-emphasis, discriminator, squelch, audio band-pass
     demod.py      wfm/nfm/am/usb/lsb/cw/dsb/raw, one shared 3-stage skeleton
     psd.py        Welch PSD in dBFS, peak hold, noise floor, occupied bandwidth
     features.py   classifier features; HD Radio sideband detection
@@ -688,7 +836,14 @@ bettersdr/
     rds.py        the 57 kHz subcarrier: BPSK, block sync, station name,
                   radio text, PI code and the US callsign it encodes
     adsb.py       1090 MHz Mode S: preamble, PPM slicing, CRC-24, CPR
-                  positions and the aircraft list (pocsag still to come)
+                  positions and the aircraft list
+    hdradio.py    the bundled nrsc5 child process: cu8 down its stdin,
+                  44.1 kHz audio up its stdout, station metadata off its
+                  stderr (pocsag still to come)
+                  Engine.set_hd borrows the window for it; core/reader.py
+                  streams gaplessly for as long as it holds the radio
+vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
+                  bundled and spoken to over pipes, never linked
   audio/
     output.py     jitter buffer + clock drift sync
     record.py     audio WAV and byte-exact baseband IQ WAV, with limits
@@ -709,7 +864,7 @@ tests/
 
 Three threads, one direction of data flow, no locks on the hot path:
 
-1. **Reader thread** — `rtlsdr_read_sync()` in a loop into a preallocated ring buffer. We use `read_sync` rather than `read_async` because it releases the GIL inside the C call and lets the scanner retune synchronously between reads, so one mechanism serves both listening and scanning.
+1. **Reader thread** — `rtlsdr_read_sync()` in a loop into a preallocated ring buffer. `read_sync` is the default because it releases the GIL inside the C call and lets the scanner retune synchronously between reads, so one mechanism serves both listening and scanning. It has one cost, and exactly one thing cannot pay it: between two reads no USB transfer is in flight, and **HD Radio does not decode through that gap**. `Reader.set_gapless` switches to `rtlsdr_read_async`, which keeps several transfers queued, for the length of an HD session only. librtlsdr calls the read callback on the reader thread, so `Device` still has exactly one owner either way — but **no device call may be made from inside that callback**; see the HD Radio facts below.
 2. **DSP thread** — consumes blocks; writes audio into the sounddevice jitter buffer and display frames into a single-slot mailbox. **Scanning runs on this same thread**, taking turns with listening rather than adding a consumer: two things draining one ring would each get half the samples. Audio stops for the length of a sweep, so scan-time starvation cannot pollute the underrun count that reports real faults.
 3. **Qt GUI thread** — a 30 Hz timer reads the latest mailbox value. Never blocks, never touches the device, drops frames rather than queueing them.
 
@@ -752,6 +907,14 @@ Device control calls are serialised through a command queue consumed by the read
   descendant through the stylesheet style, and `QLabel` is a `QFrame`, so each
   one starts painting a frame it never asked for. Use a palette, or name the
   content widget.
+- **A block-at-a-time reader is not a continuous one, and one decoder
+  cares.** Every analog mode, the scanner and ADS-B start each block
+  fresh, so the gap between two `read_sync` calls costs them a fraction
+  of a percent of samples and nothing else. An OFDM receiver tracks a
+  frame across blocks, so what matters to it is how *often* the stream is
+  discontinuous, not how much is missing - and the capture percentage
+  cannot see the difference. Anything that has to follow a signal across
+  block boundaries needs `Reader.set_gapless`.
 - **Anything sized for 2.4 MS/s is a latent bug.** Buffer sizes, block sizes
   and step plans get written against the default rate and quietly break when
   the window narrows. Express them as a duration or a fraction of the rate,

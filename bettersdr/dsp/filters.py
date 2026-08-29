@@ -10,6 +10,8 @@ moment you listen to a real station.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.signal import butter, firwin, lfilter, oaconvolve, upfirdn
 
@@ -149,6 +151,107 @@ class FirDecimator:
         # Drop the outputs that depend on samples from before the prefix.
         start = self._overlap // self.factor
         return decimated[start : start + samples.size // self.factor].astype(self.dtype)
+
+
+class RationalResampler:
+    """Change the sample rate by a ratio of whole numbers, across blocks.
+
+    Everything else in the app avoids this by construction: `dsp/demod.py`
+    insists the window be a whole multiple of the 48 kHz audio rate so no
+    stage ever resamples by an awkward ratio. HD Radio is the first thing
+    that cannot comply - NRSC-5 fixes its audio at 44,100 Hz - so the
+    conversion has to exist somewhere, and here is better than inside the
+    decoder that happens to need it first.
+
+    Upsample by `up`, filter, keep every `down`-th sample. `upfirdn` does all
+    three in one pass and only computes the samples that survive, so the cost
+    follows the output rate rather than the intermediate one.
+
+    Overlap-save carries the history, with one extra condition that the
+    decimators do not have: the output phase only stays put across a boundary
+    if the retained prefix is a whole number of *output* samples, which needs
+    the overlap to be a multiple of `down`. Each call therefore consumes a
+    multiple of `down` input samples and carries the remainder, which also
+    makes the output length exactly `up/down` of the input every time.
+    """
+
+    def __init__(
+        self,
+        up: int,
+        down: int,
+        taps_per_phase: int = DEFAULT_TAPS_PER_PHASE,
+    ) -> None:
+        if up < 1 or down < 1:
+            raise ValueError(f"rates must be >= 1, got {up}/{down}")
+        common = math.gcd(int(up), int(down))
+        self.up = int(up) // common
+        self.down = int(down) // common
+        if self.up == 1 and self.down == 1:
+            self.taps = np.ones(1, dtype=np.float32)
+            self._overlap = 0
+            self._skip = 0
+            self.reset()
+            return
+        per_phase = int(taps_per_phase) + (int(taps_per_phase) % 2)
+        # Cut off below the lower of the two Nyquist limits, measured on the
+        # upsampled grid: interpolating needs the images gone, decimating
+        # needs the aliases gone, and one filter placed at the stricter of the
+        # two does both. The gain of `up` puts back what spreading each input
+        # sample over `up` slots took out.
+        taps = firwin(self.up * per_phase + 1, 1.0 / max(self.up, self.down))
+        self.taps = (taps * self.up).astype(np.float32)
+        # How far back the filter reaches, in input samples, rounded up to the
+        # multiple of `down` the phase argument above requires.
+        reach = -(-(self.taps.size - 1) // self.up)
+        self._overlap = self.down * (-(-reach // self.down))
+        self._skip = self._overlap * self.up // self.down
+        self.reset()
+
+    @property
+    def ratio(self) -> float:
+        return self.up / self.down
+
+    def reset(self) -> None:
+        self._tail = np.zeros(0, dtype=np.float32)
+        self._channels = 0
+
+    def process(self, audio: np.ndarray) -> np.ndarray:
+        """Resample a block of `(frames,)` or `(frames, channels)` audio."""
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim not in (1, 2):
+            raise ValueError(f"expected 1 or 2 dimensions, got {audio.ndim}")
+        if self.up == 1 and self.down == 1:
+            return audio
+        channels = 1 if audio.ndim == 1 else audio.shape[1]
+        # A change of channel count is a new stream; keeping the old tail
+        # would splice one signal's history onto another's samples.
+        if channels != self._channels:
+            self.reset()
+            self._channels = channels
+            self._tail = np.zeros(
+                self._overlap if audio.ndim == 1 else (self._overlap, channels),
+                dtype=np.float32,
+            )
+
+        buf = np.concatenate((self._tail, audio))
+        # Only whole groups of `down` input samples past the prefix can be
+        # converted; the rest waits for the next block.
+        usable = ((buf.shape[0] - self._overlap) // self.down) * self.down
+        if usable <= 0:
+            self._tail = buf
+            return np.zeros(
+                0 if audio.ndim == 1 else (0, channels), dtype=np.float32
+            )
+        # What carries over is the history the next block needs *and* the
+        # samples this one could not use. Keeping only the history silently
+        # drops the remainder, which is a fraction of a block every block -
+        # inaudible as a gap and audible as a slow drift out of time.
+        self._tail = buf[usable:].copy()
+        out = upfirdn(
+            self.taps, buf[: self._overlap + usable], self.up, self.down, axis=0
+        )
+        wanted = usable * self.up // self.down
+        return out[self._skip : self._skip + wanted].astype(np.float32)
 
 
 class BiquadState:

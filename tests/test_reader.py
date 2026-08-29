@@ -8,6 +8,7 @@ that an unplugged dongle surfaces as an error instead of a hang.
 
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
 
@@ -229,3 +230,134 @@ def test_a_rejected_command_is_reported_not_swallowed():
         assert reader.is_alive()
     finally:
         reader.stop()
+
+
+# -- gapless streaming -------------------------------------------------------
+#
+# HD Radio is the one thing in the app that cannot live with the gap between
+# two `read_sync` calls - see the module docstring in `core/reader.py`. What
+# is checked here is the shape of the second mode rather than the timing: that
+# it is entered and left through the ordinary command queue, that the callback
+# still runs on the reader thread, and above all that no device call is made
+# from inside it. libusb is not reentrant, and a control transfer issued from
+# within its own event handling fails silently - a radio that did not retune.
+
+
+class StreamingDevice(FakeDevice):
+    """A fake `read_async`: delivers transfers until cancelled.
+
+    Deliberately calls the callback the way librtlsdr does, on the thread that
+    asked for the stream, so `test_no_device_call_happens_inside_the_callback`
+    is testing the real arrangement rather than a convenient one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.transfers = 0
+        self.streams = 0
+        self.cancelled = False
+        self.calls_during_callback: list[str] = []
+        self._in_callback = False
+
+    def _note_thread(self) -> None:
+        super()._note_thread()
+        if self._in_callback:
+            self.calls_during_callback.append(threading.current_thread().name)
+
+    def read_async(self, callback, buffer_count: int = 16,
+                   buffer_bytes: int = 131_072) -> None:
+        self._note_thread()
+        self.streams += 1
+        self.cancelled = False
+        block = (ctypes.c_uint8 * 1024)()
+        while not self.cancelled:
+            self.transfers += 1
+            self._in_callback = True
+            try:
+                callback(block, 1024, None)
+            finally:
+                self._in_callback = False
+            time.sleep(0.001)
+
+    def cancel_async(self) -> None:
+        self.cancelled = True
+
+
+def test_gapless_mode_is_entered_through_the_command_queue():
+    device = StreamingDevice()
+    reader = Reader(device, RingBuffer(65_536), block_bytes=1024)
+    reader.start()
+    try:
+        assert reader.wait_until_running(timeout=2.0)
+        reads_before = device.reads
+        reader.set_gapless(True)
+        assert wait_for(lambda: device.transfers > 20)
+        # Nothing is reading a block at a time any more.
+        assert device.reads == reads_before
+        assert device.streams == 1
+    finally:
+        reader.stop()
+
+
+def test_the_stream_callback_runs_on_the_reader_thread():
+    """`Device` has exactly one owner in both modes, which is what lets the
+    gapless path exist at all rather than being a second way in."""
+    device = StreamingDevice()
+    reader = Reader(device, RingBuffer(65_536), block_bytes=1024)
+    reader.start()
+    try:
+        reader.set_gapless(True)
+        assert wait_for(lambda: len(reader.ring) > 4096)
+    finally:
+        reader.stop()
+    assert device.threads == {"sdr-reader"}
+
+
+def test_no_device_call_happens_inside_the_callback():
+    """libusb is not reentrant. A control transfer from inside its own event
+    handling comes back `LIBUSB_ERROR_BUSY`, and librtlsdr carries on - so the
+    radio silently does not retune. Found off air by surveying eight
+    frequencies and reading the same call letters off all of them.
+    """
+    device = StreamingDevice()
+    reader = Reader(device, RingBuffer(65_536), block_bytes=1024)
+    reader.start()
+    try:
+        reader.set_gapless(True)
+        assert wait_for(lambda: device.transfers > 5)
+        reader.tune(94_900_000)
+        assert wait_for(lambda: device.center_freq == 94_900_000)
+    finally:
+        reader.stop()
+    assert device.calls_during_callback == []
+    # The retune ended the stream and it was entered again afterwards.
+    assert device.streams >= 2
+
+
+def test_leaving_gapless_mode_goes_back_to_reading_blocks():
+    device = StreamingDevice()
+    reader = Reader(device, RingBuffer(65_536), block_bytes=1024)
+    reader.start()
+    try:
+        reader.set_gapless(True)
+        assert wait_for(lambda: device.transfers > 5)
+        reads_before = device.reads
+        reader.set_gapless(False)
+        assert wait_for(lambda: device.reads > reads_before + 5)
+        transfers = device.transfers
+        time.sleep(0.05)
+        assert device.transfers == transfers
+    finally:
+        reader.stop()
+
+
+def test_stopping_cancels_a_running_stream():
+    """A thread inside `read_async` is not looking at the stop flag; it is
+    blocked in librtlsdr until something cancels it."""
+    device = StreamingDevice()
+    reader = Reader(device, RingBuffer(65_536), block_bytes=1024)
+    reader.start()
+    reader.set_gapless(True)
+    assert wait_for(lambda: device.transfers > 5)
+    reader.stop(timeout=2.0)
+    assert not reader.is_alive()

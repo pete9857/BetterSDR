@@ -17,6 +17,7 @@ from bettersdr.dsp.filters import (
     Deemphasis,
     Discriminator,
     FirDecimator,
+    RationalResampler,
     Squelch,
     power_dbfs,
 )
@@ -239,3 +240,91 @@ def test_power_dbfs_matches_known_amplitude():
 
 def test_power_dbfs_floors_on_silence():
     assert power_dbfs(np.zeros(0, dtype=np.complex64)) == -120.0
+
+
+# -- Rational resampling ---------------------------------------------------
+#
+# HD Radio is the reason this exists: NRSC-5 fixes its audio at 44,100 Hz and
+# everything else in the app runs at 48,000, a ratio of 160/147 that no other
+# stage ever has to deal with.
+
+
+def _audio(n: int, rate: float = 44_100.0) -> np.ndarray:
+    t = np.arange(n) / rate
+    tone = 0.5 * np.sin(2 * np.pi * 997.0 * t) + 0.3 * np.sin(2 * np.pi * 9_000.0 * t)
+    return tone.astype(np.float32)
+
+
+def test_resampler_block_by_block_matches_one_shot():
+    """The property every streaming stage in this file has to have.
+
+    Ragged blocks specifically: the resampler can only convert whole groups of
+    `down` input samples, so the remainder has to be carried. An early version
+    kept the filter history and dropped the remainder, which is a fraction of
+    a block lost every block - no gap to hear, just a slow drift out of time.
+    """
+    source = _audio(44_100)
+    whole = RationalResampler(48_000, 44_100).process(source)
+
+    streamed = RationalResampler(48_000, 44_100)
+    rng = np.random.default_rng(7)
+    parts, index = [], 0
+    while index < source.size:
+        take = int(rng.integers(1, 5_000))
+        parts.append(streamed.process(source[index : index + take]))
+        index += take
+    blocked = np.concatenate(parts)
+
+    assert blocked.size == whole.size == source.size * 160 // 147
+    assert np.array_equal(blocked, whole)
+
+
+def test_resampler_produces_the_exact_ratio():
+    out = RationalResampler(48_000, 44_100).process(_audio(147_000))
+    assert out.size == 160_000
+
+
+def test_resampler_keeps_the_channels_aligned():
+    """Two ears resampled independently are a stereo image that wanders."""
+    left = _audio(44_100)
+    stereo = np.stack((left, np.roll(left, 137)), axis=1)
+    both = RationalResampler(48_000, 44_100)
+    mono = RationalResampler(48_000, 44_100)
+    edges = range(0, 44_100, 1_000)
+    wide = np.concatenate([both.process(stereo[i : i + 1_000]) for i in edges])
+    thin = np.concatenate([mono.process(left[i : i + 1_000]) for i in edges])
+    assert wide.shape == (thin.size, 2)
+    assert np.array_equal(wide[:, 0], thin)
+
+
+def test_resampler_preserves_the_audio_band():
+    """Flat to 19 kHz, and the images it creates land above hearing."""
+    out = RationalResampler(48_000, 44_100).process(_audio(4 * 44_100))
+    window = np.hanning(32_768)
+    spectrum = np.abs(np.fft.rfft(out[48_000 : 48_000 + 32_768] * window))
+    db = 20 * np.log10(spectrum + 1e-12)
+    freqs = np.fft.rfftfreq(32_768, 1 / 48_000.0)
+
+    def level(hz: float) -> float:
+        return float(db[np.argmin(np.abs(freqs - hz))] - db.max())
+
+    assert level(997.0) == pytest.approx(0.0, abs=0.1)
+    assert level(9_000.0) == pytest.approx(-4.4, abs=1.0)
+    # Nothing the resampler invented is anywhere near audible.
+    assert float(db[freqs > 20_000].max() - db.max()) < -60.0
+
+
+def test_resampler_at_one_to_one_is_free():
+    """The same object back, so an unnecessary conversion costs one branch."""
+    block = _audio(1_000)
+    assert RationalResampler(48_000, 48_000).process(block) is block
+
+
+def test_resampler_reduces_the_ratio():
+    resampler = RationalResampler(48_000, 44_100)
+    assert (resampler.up, resampler.down) == (160, 147)
+
+
+def test_resampler_rejects_a_rate_of_zero():
+    with pytest.raises(ValueError):
+        RationalResampler(0, 44_100)

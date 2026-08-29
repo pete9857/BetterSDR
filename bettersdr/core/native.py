@@ -14,7 +14,16 @@ from __future__ import annotations
 
 import ctypes
 import sys
-from ctypes import POINTER, byref, c_char_p, c_int, c_uint32, c_void_p
+from ctypes import (
+    CFUNCTYPE,
+    POINTER,
+    byref,
+    c_char_p,
+    c_int,
+    c_uint8,
+    c_uint32,
+    c_void_p,
+)
 from enum import IntEnum
 from pathlib import Path
 
@@ -154,6 +163,13 @@ def load(force_path: Path | None = None) -> Library:
 
 
 # name, restype, argtypes
+# The callback `rtlsdr_read_async` delivers each USB transfer to: a
+# pointer to the bytes, how many there are, and the opaque context that
+# was handed to `read_async`. It is called on whichever thread called
+# `read_async`, which is what lets the reader keep its one-owner rule.
+ReadCallback = CFUNCTYPE(None, POINTER(c_uint8), c_uint32, c_void_p)
+
+
 _PROTOTYPES: tuple[tuple[str, object, tuple], ...] = (
     ("rtlsdr_get_device_count", c_uint32, ()),
     ("rtlsdr_get_device_name", c_char_p, (c_uint32,)),
@@ -184,6 +200,11 @@ _PROTOTYPES: tuple[tuple[str, object, tuple], ...] = (
     ("rtlsdr_get_xtal_freq", c_int, (c_void_p, POINTER(c_uint32), POINTER(c_uint32))),
     ("rtlsdr_reset_buffer", c_int, (c_void_p,)),
     ("rtlsdr_read_sync", c_int, (c_void_p, c_void_p, c_int, POINTER(c_int))),
+    (
+        "rtlsdr_read_async",
+        c_int,
+        (c_void_p, ReadCallback, c_void_p, c_uint32, c_uint32),
+    ),
     ("rtlsdr_cancel_async", c_int, (c_void_p,)),
 )
 
@@ -207,6 +228,7 @@ def _bind(lib: ctypes.CDLL, is_fork: bool) -> None:
 
 __all__ = [
     "DriverNotFoundError",
+    "ReadCallback",
     "Library",
     "RtlSdrError",
     "Tuner",

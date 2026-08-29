@@ -15,16 +15,20 @@ import threading
 import numpy as np
 import pytest
 
+from bettersdr.core import engine as engine_module
 from bettersdr.core.device import MAX_TUNE_HZ, MIN_TUNE_HZ
 from bettersdr.core.engine import (
     DSP_BLOCK_BYTES,
     DSP_BLOCK_SECONDS,
+    HD_ACQUIRE_TIMEOUT_S,
     SPECTRUM_HZ,
     DisplayFrame,
     Engine,
     Mailbox,
     dsp_block_bytes_for,
 )
+from bettersdr.decode.hdradio import SAMPLE_RATE_HZ as HD_RATE
+from bettersdr.decode.hdradio import HdState
 from bettersdr.dsp.psd import DEFAULT_FFT_SIZE
 from tests import synth_adsb as gen
 
@@ -517,9 +521,13 @@ class FakeScanReader(FakeReader):
         super().__init__()
         self.sample_rates: list[int] = []
         self.tuned: list[int] = []
+        self.gapless: list[bool] = []
 
     def set_sample_rate(self, rate: int) -> None:
         self.sample_rates.append(int(rate))
+
+    def set_gapless(self, enabled: bool) -> None:
+        self.gapless.append(bool(enabled))
 
     def tune(self, hz: int) -> None:
         self.tuned.append(int(hz))
@@ -903,3 +911,292 @@ def test_the_audio_stays_parked_until_every_probe_has_landed():
     assert engine.probing, "unparked while the second probe was still to run"
     engine.reader.commands[-1](FakeGainDevice())
     assert not engine.probing
+
+
+# -- HD Radio ----------------------------------------------------------------
+#
+# The digital programme is the first feature that borrows the radio without
+# going anywhere: it keeps the frequency and takes the window, at a rate no
+# demodulator can be built for. So what these check is the borrowing - what is
+# taken, what comes back, and what happens to a station that turns out not to
+# carry HD at all. The decoder itself is somebody else's program and is
+# exercised in `tests/test_hdradio.py`.
+
+
+class FakeHdRadio:
+    """The nrsc5 child process, without the child process."""
+
+    started: list[FakeHdRadio] = []
+
+    def __init__(self, program: int = 0, audio_rate: int = 48_000, path=None) -> None:
+        self.program = int(program)
+        self.audio_rate = int(audio_rate)
+        self.running = False
+        self.stopped = False
+        self.fed = 0
+        self.pending = np.zeros((0, 2), dtype=np.float32)
+
+    def start(self) -> bool:
+        self.running = True
+        FakeHdRadio.started.append(self)
+        return True
+
+    def stop(self) -> None:
+        self.running = False
+        self.stopped = True
+
+    def feed(self, raw) -> None:
+        self.fed += len(raw)
+
+    def audio(self) -> np.ndarray:
+        block, self.pending = self.pending, np.zeros((0, 2), dtype=np.float32)
+        return block
+
+    def snapshot(self) -> HdState:
+        return HdState(running=self.running, program=self.program)
+
+
+@pytest.fixture
+def hd(monkeypatch):
+    """A decoder that costs nothing to start, and a build that has one."""
+    FakeHdRadio.started = []
+    monkeypatch.setattr(engine_module, "HdRadio", FakeHdRadio)
+    monkeypatch.setattr(engine_module.hdradio, "available", lambda: True)
+    return FakeHdRadio
+
+
+def _listening(center_hz: int = 94_900_000) -> Engine:
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.center_hz = center_hz
+    return engine
+
+
+def _running_hd(center_hz: int = 94_900_000) -> Engine:
+    engine = _listening(center_hz)
+    engine.set_hd(True)
+    _drain(engine)
+    return engine
+
+
+def test_a_session_borrows_the_window_and_leaves_the_frequency_alone(hd):
+    """HD rides on the same carrier as the analog broadcast.
+
+    So unlike a sweep or the aircraft screen this excursion does not go
+    anywhere - and `center_hz` must not move, because every view reads it to
+    decide what the radio is pointed at.
+    """
+    engine = _running_hd()
+    assert engine.sample_rate == HD_RATE
+    assert engine.reader.sample_rates[-1] == HD_RATE
+    assert engine.center_hz == 94_900_000
+    assert engine.reader.tuned == []
+
+
+def test_the_stream_is_asked_for_after_the_probe_and_dropped_before_the_rest(hd):
+    """A gain probe reads the device directly, which cannot happen while a
+    stream is running - so gapless mode goes on last and comes off first."""
+    engine = _running_hd()
+    assert engine.reader.gapless == [True]
+    assert engine.reader.commands, "the probe must be queued before the stream"
+
+    engine.set_hd(False)
+    _drain(engine)
+    assert engine.reader.gapless == [True, False]
+
+
+def test_the_window_it_borrows_has_no_demodulator_that_fits(hd):
+    """1,488,375 is not a whole multiple of 48 kHz, and `demod.create`
+    refuses rather than silently resampling by an awkward ratio - which is
+    right, and is why the engine has to not ask. Asking raised on the DSP
+    thread, which is the radio going deaf with nothing on screen to say why.
+    """
+    engine = _running_hd()
+    assert engine.sample_rate % 48_000 != 0
+    assert engine._demod.sample_rate == 2_400_000
+
+
+def test_a_setting_chosen_during_a_session_is_applied_when_it_ends(hd):
+    """There is no demodulator to apply it to at the time, and dropping it
+    would be a control that silently does nothing while HD is on."""
+    engine = _running_hd()
+    engine.set_bandwidth(150_000.0)
+    _drain(engine)
+    assert engine._demod.bandwidth_hz != 150_000.0
+
+    engine.set_hd(False)
+    _drain(engine)
+    assert engine.sample_rate == 2_400_000
+    assert engine._demod.bandwidth_hz == 150_000.0
+
+
+def test_ending_a_session_gives_back_the_window_the_tuner_and_the_gain(hd):
+    engine = _running_hd()
+    radio = engine._hd
+    probes = len(engine.reader.commands)
+
+    engine.set_hd(False)
+    _drain(engine)
+    assert radio.stopped
+    assert engine._hd is None
+    assert engine.sample_rate == 2_400_000
+    assert engine.reader.sample_rates[-1] == 2_400_000
+    assert engine.reader.tuned[-1] == 94_900_000
+    # Measured at the window being returned to, not the one being left: the
+    # neighbouring channels are back inside it.
+    assert len(engine.reader.commands) == probes + 1
+
+
+def test_offset_tuning_is_put_away_for_the_session_and_comes_back(hd):
+    """The decoder reads the bytes ahead of the front-end chain, so a shift
+    applied in software never reaches it - nrsc5 would be handed a station
+    sitting a few hundred kHz off the middle of its window."""
+    engine = _listening()
+    engine.set_offset_tuning(300_000.0)
+    engine.set_hd(True)
+    _drain(engine)
+    assert engine.front.offset_hz == 0.0
+    assert engine.reader.tuned[-1] == 94_900_000
+
+    engine.set_hd(False)
+    _drain(engine)
+    assert engine.front.offset_hz == 300_000.0
+    assert engine.reader.tuned[-1] == 95_200_000
+
+
+def test_asking_for_a_different_window_says_what_to_come_back_to(hd):
+    """There is exactly one rate nrsc5 accepts, so a request during a session
+    cannot be a request to change the window."""
+    engine = _running_hd()
+    engine.set_sample_rate(1_200_000)
+    assert engine.sample_rate == HD_RATE
+    assert engine._hd_resume_rate == 1_200_000
+
+    engine.set_hd(False)
+    _drain(engine)
+    assert engine.sample_rate == 1_200_000
+
+
+def test_re_asserting_the_current_window_leaves_the_resume_window_alone(hd):
+    """`_guard_window` does this on every retune, and during a session the
+    current window is the HD one - which is not a window the app otherwise
+    uses, so narrowing it to the nearest one would quietly take a listener
+    from 2.4 MS/s to 1.44 the moment they moved the dial."""
+    engine = _running_hd()
+    engine.set_sample_rate(engine.sample_rate)
+    assert engine._hd_resume_rate == 2_400_000
+
+
+def test_a_station_with_no_hd_hands_it_back_and_keeps_the_switch(hd):
+    """The switch is a standing wish, not a command about one station.
+
+    Leaving a receiver silent because a digital signal the station never
+    advertised failed to appear is exactly the kind of dead end a beginner
+    cannot diagnose - so the analog broadcast comes back on its own, and the
+    next station still gets its chance.
+    """
+    engine = _running_hd()
+    engine._hd_started -= HD_ACQUIRE_TIMEOUT_S + 1.0
+    assert engine._feed_hd(np.zeros(16, dtype=np.uint8)).size == 0
+
+    assert engine._hd is None
+    assert engine.sample_rate == 2_400_000
+    assert engine.hd_enabled
+    assert "normal broadcast" in engine.hd_message
+    # And not retried on this station, however many blocks go past.
+    engine._apply_hd()
+    assert engine._hd is None
+
+    engine.tune(88_500_000)
+    _drain(engine)
+    assert engine._hd is not None
+
+
+def test_a_session_is_not_offered_outside_broadcast_fm(hd):
+    """NRSC-5 is an FM broadcast standard. Running the decoder anywhere else
+    would be a feature that can only ever fail."""
+    engine = _running_hd()
+    engine.set_mode("nfm")
+    _drain(engine)
+    assert engine._hd is None
+    assert engine.sample_rate == 2_400_000
+
+    engine.set_mode("wfm")
+    _drain(engine)
+    assert engine._hd is not None
+
+
+def test_the_subchannel_does_not_travel_across_the_dial(hd):
+    """HD2 on one station has nothing whatever to do with HD2 on the next,
+    and asking for it on a station that has only HD1 costs twelve seconds of
+    silence to discover."""
+    engine = _running_hd()
+    engine.set_hd_program(1)
+    _drain(engine)
+    assert engine._hd.program == 1
+
+    engine.tune(88_500_000)
+    _drain(engine)
+    assert engine.hd_program == 0
+    assert engine._hd.program == 0
+
+
+def test_a_programme_change_restarts_the_decoder_and_nothing_else(hd):
+    """nrsc5 takes a programme change only as a console keypress, which a
+    pipe cannot deliver, so the only way to ask is a new process. The window
+    and the gain are already right and must not be paid for twice."""
+    engine = _running_hd()
+    windows, probes = len(engine.reader.sample_rates), len(engine.reader.commands)
+    first = engine._hd
+
+    engine.set_hd_program(1)
+    _drain(engine)
+    assert first.stopped
+    assert len(FakeHdRadio.started) == 2
+    assert engine._hd.program == 1
+    assert len(engine.reader.sample_rates) == windows
+    assert len(engine.reader.commands) == probes
+
+
+def test_retuning_to_where_we_already_are_costs_nothing(hd):
+    """Every click on the spectrum is a retune, and a restart is five and a
+    half seconds of silence."""
+    engine = _running_hd()
+    radio = engine._hd
+    engine.tune(94_900_000)
+    _drain(engine)
+    assert engine._hd is radio
+    assert len(FakeHdRadio.started) == 1
+
+
+def test_a_sweep_takes_the_window_back_before_recording_what_to_resume(hd):
+    """A sweep must take nothing from the band it was listening to, and the
+    HD window is the least representative one the app ever holds."""
+    engine = _running_hd()
+    engine.start_scan(88e6, 108e6)
+    _drain(engine)
+    assert engine._hd is None
+    assert engine._resume_rate == 2_400_000
+    assert engine._resume_hz == 94_900_000
+
+
+def test_the_session_comes_back_after_a_sweep(hd):
+    engine = _running_hd()
+    engine.start_scan(88e6, 108e6)
+    _drain(engine)
+    engine._end_scan()
+    _drain(engine)
+    assert engine._hd is not None
+    assert engine.sample_rate == HD_RATE
+
+
+def test_aircraft_tracking_takes_the_window_back_too(hd):
+    engine = _running_hd()
+    engine.start_adsb()
+    _drain(engine)
+    assert engine._hd is None
+    assert engine._adsb_resume_rate == 2_400_000
+
+    engine._end_adsb()
+    _drain(engine)
+    assert engine._hd is not None

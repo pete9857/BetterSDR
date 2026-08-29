@@ -28,6 +28,7 @@ from ..audio.record import (
     RecordingLimits,
     timestamped_name,
 )
+from ..decode import hdradio
 from ..decode.adsb import (
     FREQUENCY_HZ as ADSB_FREQUENCY_HZ,
 )
@@ -37,6 +38,16 @@ from ..decode.adsb import (
 from ..decode.adsb import (
     AdsbReceiver,
     AdsbState,
+)
+from ..decode.hdradio import (
+    OCCUPIED_BANDWIDTH_HZ as HD_BANDWIDTH_HZ,
+)
+from ..decode.hdradio import (
+    SAMPLE_RATE_HZ as HD_SAMPLE_RATE_HZ,
+)
+from ..decode.hdradio import (
+    HdRadio,
+    HdState,
 )
 from ..decode.rds import MIN_IF_RATE_HZ, RdsReceiver, RdsState
 from ..dsp import convert, demod
@@ -79,6 +90,14 @@ SPECTRUM_HZ = 45.0
 # slower than the spectrum on purpose: an aircraft reports about twice a
 # second, so a faster rate only re-sorts a list that has not changed.
 ADSB_UPDATE_HZ = 5.0
+# How long an HD Radio session waits for the digital signal before handing
+# the station back to the analog receiver. Acquisition was measured at 5.5 s
+# on a strong local station, so this is twice that with margin: long enough
+# that a station which does carry HD is never abandoned mid-search, short
+# enough that leaving the switch on over a station which does not costs a few
+# seconds of quiet rather than a radio that is silent until somebody works
+# out why.
+HD_ACQUIRE_TIMEOUT_S = 12.0
 # What a block produces when the radio is doing something that is not
 # listening. Shared rather than allocated per block, and shaped so the
 # recorders can be handed it without a special case.
@@ -130,6 +149,11 @@ class DisplayFrame:
     # or the feature switched off - which is a different thing from a
     # station that carries no RDS, and the view says so differently.
     rds: RdsState | None = None
+    # The digital programme, where one is being decoded. None means no HD
+    # session is running, which is a different thing from a session that has
+    # not found the signal yet - that one is running with `synced` false, and
+    # the screen says so differently.
+    hd: HdState | None = None
     # Whether what just went to the sound card was two different channels.
     # Reported from the audio rather than from the pilot on purpose: audio
     # noise reduction mixes down, so a pilot-only flag would light the
@@ -292,6 +316,30 @@ class Engine:
         # scan - park the audio, remember where to come back to - rather than
         # like RDS.
         self._adsb: AdsbReceiver | None = None
+        # HD Radio. Shaped like neither of the above: it is a decoder, like
+        # RDS, but it needs its own window and it *replaces* the sound rather
+        # than annotating it, like an excursion. The switch is a standing
+        # wish rather than a command - it stays on across retunes and the
+        # engine starts a session wherever one is possible - because a
+        # listener who wants the digital programme wants it on every station
+        # that has one, not on the one station they happened to press it on.
+        self.hd_enabled = False
+        self.hd_program = 0
+        # Why the last session stopped, for a screen that has to explain a
+        # switch that is on with nothing coming out of it.
+        self.hd_message = ""
+        self._hd: HdRadio | None = None
+        self._hd_resume_rate: int | None = None
+        self._hd_resume_offset = 0.0
+        self._hd_acquired = False
+        self._hd_started = 0.0
+        # The station and programme the running decoder was started for, so
+        # retuning to where we already are does not cost a restart.
+        self._hd_key: tuple[int, int] | None = None
+        # Set when a station has been given its 12 seconds and produced
+        # nothing. Keeps the switch on - the next station may well carry HD -
+        # while stopping this one from being retried forever.
+        self._hd_gave_up = False
 
         # The two optional chains either side of the demodulator. Both are a
         # no-op until something is switched on; see `dsp/chain.py`.
@@ -311,6 +359,12 @@ class Engine:
         self._spectrum = Spectrum(fft_size=fft_size, sample_rate=float(sample_rate))
         self._demod = demod.create(self.mode, float(sample_rate), volume=1.0)
         self._demod.clip = False
+        # What the demodulator *would* be built as. Kept apart from the
+        # object itself because an HD Radio session runs at a window no
+        # demodulator can be built for, and a mode or bandwidth chosen during
+        # one has to survive until the window comes back. See `_rebuild`.
+        self._wanted_mode = self.mode
+        self._wanted_bandwidth_hz = self._demod.bandwidth_hz
         self._apply_rds()
         self._apply_stereo()
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
@@ -415,6 +469,12 @@ class Engine:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        # After the join, so the thread that owns it is definitely gone. A
+        # child process outliving the app is the one failure mode a bundled
+        # decoder must not have.
+        if self._hd is not None:
+            self._hd.stop()
+            self._hd = None
         if self.reader is not None:
             self.reader.stop()
             self.reader = None
@@ -445,13 +505,29 @@ class Engine:
         # choke point every tuning path goes through, and a frequency the
         # dongle cannot reach is rejected on the reader thread where nobody
         # can see it. See `frontend.safe_center_hz`.
+        moved = safe_center_hz(center_hz) != self.center_hz
         self.center_hz = safe_center_hz(center_hz)
         if self.reader is not None:
             self.reader.tune(self.device_center_hz)
+        if moved:
+            # A station that had no HD gets another chance at the next one,
+            # which is the whole point of the switch being a standing wish.
+            self._hd_gave_up = False
+            # And the subchannel does not travel: HD2 on one station has
+            # nothing whatever to do with HD2 on the next, so asking for it
+            # again on a station that has only HD1 would cost twelve seconds
+            # of silence to discover.
+            self.hd_program = 0
         # A new frequency is a new station, and the old one's name lingering
         # on screen over somebody else's signal is worse than a blank.
         self._commands.put(self._reset_rds)
         self._commands.put(self._reset_stereo)
+        # A new carrier needs a new decoder - nrsc5 cannot be moved to one -
+        # and a station arrived at with the switch already on needs a session
+        # starting. Queued in this order so the second is a no-op when the
+        # first has already done the work.
+        self._commands.put(self._restart_hd)
+        self._commands.put(self._apply_hd)
 
     @property
     def device_center_hz(self) -> int:
@@ -542,6 +618,9 @@ class Engine:
         """Swap the demodulator. Runs on the DSP thread, which owns it."""
         self.mode = mode
         self._commands.put(lambda: self._rebuild(mode, bandwidth_hz))
+        # HD Radio exists only on broadcast FM, so leaving that mode ends a
+        # session and coming back to it starts one.
+        self._commands.put(self._apply_hd)
 
     def set_sample_rate(self, sample_rate_hz: int) -> None:
         """Change how wide a window the radio looks through.
@@ -552,6 +631,26 @@ class Engine:
         everywhere else is, because a caller asking for a window that reaches
         0 Hz is asking for the upconverter's oscillator instead of a station.
         """
+        if self._hd_resume_rate is not None:
+            # An HD Radio session holds the window, and holds it at exactly
+            # one rate: 1,488,375 S/s is fixed by the standard and there is
+            # no other value nrsc5 will accept. So a request now is not a
+            # request to change the window - it is a statement of what to
+            # come back to when the session ends.
+            #
+            # `_guard_window` re-asserts the current rate on every retune,
+            # and during a session that *is* the HD rate. It is not one of
+            # the windows the app otherwise uses, so it is read as "leave the
+            # resume window alone" rather than narrowed to the nearest one -
+            # which would quietly take a listener from 2.4 MS/s to 1.44 the
+            # moment they moved the dial.
+            wanted = int(sample_rate_hz)
+            if wanted == HD_SAMPLE_RATE_HZ:
+                wanted = self._hd_resume_rate
+            self._hd_resume_rate = safe_sample_rate(
+                self.center_hz, preferred_hz=wanted
+            )
+            return
         rate = safe_sample_rate(self.center_hz, preferred_hz=int(sample_rate_hz))
         if rate == self.sample_rate:
             return
@@ -584,6 +683,51 @@ class Engine:
         self.rds_enabled = bool(enabled)
         self._commands.put(self._apply_rds)
 
+    def set_hd(self, enabled: bool) -> None:
+        """Listen to the digital programme instead of the analog one.
+
+        This is a wish rather than a command. HD Radio only exists on
+        broadcast FM, needs the whole radio at a window nothing else uses,
+        and takes about five and a half seconds to find - so the switch says
+        "use it wherever it is available" and the engine starts and stops
+        sessions to match. Retuning to a station with no HD falls back to the
+        analog broadcast on its own and leaves the switch on for the next one.
+        """
+        self.hd_enabled = bool(enabled)
+        if self.hd_enabled:
+            # Pressing it again is an explicit retry, including on a station
+            # that has already been given up on.
+            self._hd_gave_up = False
+            self.hd_message = ""
+        self._commands.put(self._apply_hd)
+
+    def set_hd_program(self, index: int) -> None:
+        """Switch to another of the station's digital programmes.
+
+        HD2 and HD3 are separate broadcasts sharing one carrier, and they are
+        most of the reason to want this feature at all. Changing to one costs
+        the acquisition again: nrsc5 takes a programme change only as a
+        console keypress, which a pipe cannot deliver, so the only way to ask
+        for a different one is a new process.
+        """
+        program = max(0, min(hdradio.MAX_PROGRAMS - 1, int(index)))
+        if program == self.hd_program:
+            return
+        self.hd_program = program
+        self._hd_gave_up = False
+        self._commands.put(self._restart_hd)
+        self._commands.put(self._apply_hd)
+
+    @property
+    def hd_available(self) -> bool:
+        """Whether this build has a decoder to run at all."""
+        return hdradio.available()
+
+    @property
+    def hd_running(self) -> bool:
+        radio = self._hd
+        return radio is not None and radio.running
+
     def set_deemphasis(self, tau_us: float | str | None) -> None:
         """`"auto"`, `None` for off, or 50 / 75 microseconds."""
         self.deemphasis_us = tau_us
@@ -610,6 +754,14 @@ class Engine:
         the chain thinks it did.
         """
         self.front.set_offset_hz(offset_hz)
+        if self._hd_resume_rate is not None:
+            # The HD decoder is fed the bytes straight off the ring, ahead of
+            # the front-end chain, so a shift applied in software would never
+            # reach it. The offset is put away for the session - see
+            # `_begin_hd` - and this only changes what comes back.
+            self._hd_resume_offset = float(offset_hz)
+            self.front.set_offset_hz(0.0)
+            return
         if self.reader is not None:
             self.reader.tune(self.device_center_hz)
 
@@ -830,6 +982,11 @@ class Engine:
     def _begin_scan(self, sweeper: Sweeper) -> None:
         if self.reader is None:
             return
+        # First, so the window it hands back is the one recorded below as
+        # what to resume on. A sweep must take nothing from the band it was
+        # listening to, and the HD window is the least representative one the
+        # app ever holds.
+        self._end_hd()
         self._resume_hz = self.center_hz
         self._resume_rate = self.sample_rate
         self._sweeper = sweeper
@@ -926,6 +1083,10 @@ class Engine:
             self.auto_gain()
         if self.sink is not None:
             self.sink.start()
+        # Queued rather than called, so it runs after the `_restart_hd` that
+        # the retune above put on the queue - which would otherwise restart a
+        # session started here a moment earlier and pay the acquisition twice.
+        self._commands.put(self._apply_hd)
 
     def _scan_step(self) -> None:
         sweeper, source = self._sweeper, self._scan_source
@@ -998,6 +1159,10 @@ class Engine:
         """
         if self.reader is None:
             return
+        # Before the window is recorded, for the same reason as `_begin_scan`:
+        # what comes back has to be the window that was being listened
+        # through, not the one HD Radio was borrowing.
+        self._end_hd()
         self._adsb_resume_rate = self.sample_rate
         # ADS-B is 1 Mbit/s and the pulses are half a microsecond, so this is
         # the one feature in the app with a hard floor under the window width
@@ -1099,6 +1264,8 @@ class Engine:
             # returned to. 1090 MHz takes a far higher gain than any broadcast
             # band, and leaving it would hand back a clipped station.
             self._probe_gain_directly("listening again")
+        # Queued for the same reason as in `_end_scan`.
+        self._commands.put(self._apply_hd)
 
     def _feed_adsb(self, iq: np.ndarray) -> None:
         """Hand one block to the receiver and republish the sky, slowly.
@@ -1149,6 +1316,203 @@ class Engine:
             "read 1 Mbit/s data bursts."
         )
 
+    # -- HD Radio, on the DSP thread ---------------------------------------
+
+    def _hd_possible(self) -> bool:
+        """Whether a session could run right now.
+
+        Every one of these can change under the user, which is why the answer
+        is recomputed rather than remembered: a decoder to run, broadcast FM
+        to point it at, and a radio that is not already on loan to a sweep or
+        to the aircraft screen. `wfm` is the test for the band because HD
+        Radio is an FM-band standard - on any other mode there is nothing for
+        nrsc5 to find, and it would spend the whole session saying so.
+        """
+        return (
+            self.hd_enabled
+            and not self._hd_gave_up
+            and self.mode == "wfm"
+            and self.reader is not None
+            and self._sweeper is None
+            and self._adsb is None
+            and hdradio.available()
+        )
+
+    def _apply_hd(self) -> None:
+        """Bring the session into line with what is currently possible."""
+        if self._hd_possible():
+            if self._hd is None:
+                self._begin_hd()
+        elif self._hd is not None:
+            self._end_hd()
+
+    def _begin_hd(self) -> None:
+        """Hand the station over to the digital decoder.
+
+        Shaped like `_begin_adsb`, for the same reasons, with one difference
+        that matters: **the frequency does not move.** HD Radio rides on the
+        same carrier as the analog broadcast, so this borrows the window and
+        nothing else, and `center_hz` stays exactly where the listener put it.
+
+        What it borrows is unusual enough to state plainly. 1,488,375 S/s is
+        fixed by the NRSC-5 standard and is not a whole multiple of 48 kHz -
+        31.0078 - so for as long as this holds the radio there is **no
+        demodulator at all**: `_rebuild` has nothing it can build and the
+        analog audio path is not running. That is why the digital programme
+        replaces the sound rather than being mixed into it, and it is the one
+        thing to hold in mind for the rest of this section.
+
+        Ordered the way the other two excursions are: the window before the
+        tuner, the gain last and at the window the session will run through.
+        """
+        if self.reader is None or self._hd is not None:
+            return
+        if not self._start_hd_decoder():
+            return
+        self._hd_resume_rate = self.sample_rate
+        # Offset tuning is put away for the duration. The decoder reads the
+        # raw bytes off the ring, ahead of the front-end chain, so a shift
+        # applied in software never reaches it - nrsc5 would be handed a
+        # station sitting a few hundred kHz off the middle of its window and
+        # would search for a frame that was not there. It comes back with the
+        # window.
+        self._hd_resume_offset = self.front.offset_hz
+        moved = self._hd_resume_offset != 0.0
+        if moved:
+            self.front.set_offset_hz(0.0)
+        self.sample_rate = HD_SAMPLE_RATE_HZ
+        self.reader.set_sample_rate(HD_SAMPLE_RATE_HZ)
+        self._apply_sample_rate(HD_SAMPLE_RATE_HZ)
+        if moved:
+            self.reader.tune(self.device_center_hz)
+        # Narrowing from 2.4 MS/s takes the neighbouring channels out of the
+        # window, which is headroom the front end can spend - and the digital
+        # sidebands sit 12 to 18 dB below the carrier, so it is headroom the
+        # part we are here for actually needs. Free at this moment either
+        # way: nothing is playing for the next few seconds regardless.
+        self._probe_gain_directly("HD Radio")
+        # Last, and that order is the whole of it: the probe reads the
+        # device directly, which cannot happen while a stream is running.
+        # From here on several USB transfers stay in flight, because the
+        # gap between one read and the next is the difference between this
+        # decoding and not - see `core/reader.py`.
+        self.reader.set_gapless(True)
+
+    def _start_hd_decoder(self) -> bool:
+        """Launch nrsc5 for the current station and programme.
+
+        Touches neither the window nor the gain, so `_restart_hd` can use it
+        for a programme change without paying for either.
+        """
+        radio = HdRadio(program=self.hd_program, audio_rate=demod.AUDIO_RATE)
+        if not radio.start():
+            # A build with no decoder, or one somebody deleted. The switch
+            # goes off rather than sitting on over silence.
+            self.hd_enabled = False
+            self.hd_message = (
+                radio.snapshot().error or "The HD Radio decoder would not start."
+            )
+            self.last_error = self.hd_message
+            return False
+        self._hd = radio
+        self._hd_acquired = False
+        self._hd_started = time.perf_counter()
+        self._hd_key = (int(self.center_hz), self.hd_program)
+        self.hd_message = ""
+        return True
+
+    def _restart_hd(self) -> None:
+        """Point the decoder at whatever the radio is on now.
+
+        nrsc5 locks onto one carrier and one programme and neither can be
+        changed by talking to it, so a new station or a new subchannel costs
+        a new process and the acquisition with it. The window and the gain
+        are already right, so nothing else moves - and a retune that did not
+        actually go anywhere costs nothing at all.
+        """
+        radio = self._hd
+        if radio is None:
+            return
+        if self._hd_key == (int(self.center_hz), self.hd_program):
+            return
+        self._hd = None
+        radio.stop()
+        if not self._start_hd_decoder():
+            self._end_hd()
+
+    def _end_hd(self) -> None:
+        """Give the station back to the analog receiver.
+
+        Everything borrowed goes back in the order it was taken - the offset,
+        then the window, then the frequency, then a fresh gain measurement at
+        the window being returned to. Putting the window back is what rebuilds
+        the demodulator, so it is also the moment the analog path exists
+        again.
+
+        Reached from several directions and sometimes twice, so like
+        `_end_scan` and `_end_adsb` it must not repeat the work: a gain probe
+        is 340 ms of dead air.
+        """
+        radio, self._hd = self._hd, None
+        if radio is not None:
+            radio.stop()
+        self._hd_acquired = False
+        self._hd_key = None
+        borrowed = self._hd_resume_rate is not None
+        if borrowed and self.reader is not None:
+            # Before everything below, because none of it can touch the
+            # device until the stream has been torn down: a rate change, a
+            # retune and a gain probe all talk to it directly.
+            self.reader.set_gapless(False)
+        if self._hd_resume_offset:
+            self.front.set_offset_hz(self._hd_resume_offset)
+            self._hd_resume_offset = 0.0
+        if self._hd_resume_rate is not None:
+            if self._hd_resume_rate != self.sample_rate:
+                self.sample_rate = self._hd_resume_rate
+                if self.reader is not None:
+                    self.reader.set_sample_rate(self.sample_rate)
+                self._apply_sample_rate(self.sample_rate)
+            self._hd_resume_rate = None
+        if borrowed and self.reader is not None:
+            self.reader.tune(self.device_center_hz)
+            self._probe_gain_directly("listening again")
+
+    def _feed_hd(self, raw: np.ndarray) -> np.ndarray:
+        """Give the decoder a block and take back whatever it has finished.
+
+        The bytes go across untouched: `cu8` on nrsc5's stdin is byte for
+        byte what the ring buffer already holds, so the whole conversion is
+        the absence of one.
+        """
+        radio = self._hd
+        if radio is None:
+            return _NO_AUDIO
+        radio.feed(raw)
+        if not radio.running:
+            self.hd_message = radio.snapshot().error or "The HD Radio decoder stopped."
+            self._end_hd()
+            return _NO_AUDIO
+        audio = radio.audio()
+        if audio.shape[0]:
+            return audio
+        if (
+            not self._hd_acquired
+            and time.perf_counter() - self._hd_started > HD_ACQUIRE_TIMEOUT_S
+        ):
+            # This station does not carry HD, or does not carry it strongly
+            # enough to decode indoors. Falling back is the whole reason the
+            # switch survives it: leaving a receiver silent because a digital
+            # signal it never advertised failed to appear is exactly the kind
+            # of dead end a beginner cannot diagnose.
+            self._hd_gave_up = True
+            self.hd_message = (
+                "Could not pick up HD Radio here - playing the normal "
+                "broadcast instead."
+            )
+            self._end_hd()
+        return _NO_AUDIO
+
     def _apply_sample_rate(self, rate: int) -> None:
         """Rebuild everything that was built around the old rate.
 
@@ -1180,10 +1544,26 @@ class Engine:
         # rate, and a DC tracker with a quarter-second time constant at
         # 2.4 MS/s is a two-and-a-half second one at 240 kS/s.
         self.front.set_sample_rate(float(rate))
-        self._rebuild(self.mode, self._demod.bandwidth_hz)
+        # HD Radio's 1,488,375 S/s is not a whole multiple of 48 kHz, and
+        # `demod.create` refuses rather than silently resampling by an
+        # awkward ratio - which is right, and is why the check is here rather
+        # than a try/except around it. There is no demodulator to build at
+        # that window and none is needed; `_run` is feeding nrsc5 instead.
+        # What the demodulator *would* be is kept on `_wanted_mode` and
+        # `_wanted_bandwidth_hz`, so `_end_hd` putting the window back is
+        # also what builds it again, with any choice made in the meantime.
+        if rate % demod.AUDIO_RATE == 0:
+            self._rebuild(self._wanted_mode, self._wanted_bandwidth_hz)
         self._apply_adsb_rate(rate)
         if self.sink is not None:
             self.sink.start()
+            # Say so, whatever `_run` last believed. A rate change inside a
+            # parked stretch leaves the loop thinking the audio is still
+            # parked, so it never parks it again and the sink plays into
+            # whatever comes next - which for the way back from the aircraft
+            # screen into an HD session is a gain probe and a five-second
+            # acquisition. Measured at 162 underruns on exactly that path.
+            self._sink_parked = False
 
     def _apply_display(
         self, fft_size: int | None, window: str | None, smoothing: float | None
@@ -1278,6 +1658,19 @@ class Engine:
             self._stereo.reset()
 
     def _rebuild(self, mode: str, bandwidth_hz: float | None) -> None:
+        # Recorded before anything else, so a mode or a bandwidth chosen
+        # while HD Radio holds the window is applied when the window comes
+        # back rather than quietly dropped. Resolved to a number here because
+        # `None` means "the mode's own default", and that has to be answered
+        # while the mode is still the one being asked about.
+        self._wanted_mode = mode
+        self._wanted_bandwidth_hz = (
+            float(bandwidth_hz)
+            if bandwidth_hz is not None
+            else demod.MODES[mode].default_bandwidth_hz
+        )
+        if self.sample_rate % demod.AUDIO_RATE:
+            return
         self._demod = demod.create(
             mode,
             float(self.sample_rate),
@@ -1387,7 +1780,20 @@ class Engine:
             # radio is 1090 MHz away from anything anybody wanted to hear.
             # One expression, so parking cannot be started by one mechanism
             # and ended by the other.
-            parked = self.probing or self._adsb is not None
+            # An HD session parks it too, but only until the digital signal
+            # arrives: acquisition is a known five and a half seconds of
+            # silence, and forty expected underruns every time somebody
+            # presses the switch is how the one number that reports a real
+            # audio fault stops meaning anything. After that the sink stays
+            # open - a drop-out mid-session is the signal going away, which
+            # is worth seeing rather than papering over, and reopening the
+            # sound card at every flutter would put a gap in the audio in
+            # exactly the conditions that least need one.
+            parked = (
+                self.probing
+                or self._adsb is not None
+                or (self._hd is not None and not self._hd_acquired)
+            )
             if parked != self._sink_parked:
                 self._sink_parked = parked
                 if parked:
@@ -1415,6 +1821,25 @@ class Engine:
                 self._feed_adsb(iq)
                 self._stereo_out = False
                 audio = _NO_AUDIO
+            elif self._hd is not None:
+                # Fed from `raw`, not from `iq`: `cu8` is byte for byte what
+                # nrsc5 reads, and the front-end chain is bypassed for the
+                # decoder because a shift or a blanker applied here would be
+                # something the digital receiver was never designed to see.
+                # `iq` is still built above, and still drives the spectrum.
+                block = self._feed_hd(raw)
+                audio = self.audio.process(block) if block.size else _NO_AUDIO
+                self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
+                if audio.size:
+                    if not self._hd_acquired:
+                        # The first digital audio of the session. Unparked
+                        # here rather than at the top of the next pass, so
+                        # the block that ended the wait is the first one
+                        # heard rather than the one thrown away.
+                        self._hd_acquired = True
+                        self._sink_parked = False
+                        sink.start()
+                    sink.write(audio)
             else:
                 audio = self.audio.process(self._demod.process(iq))
                 self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
@@ -1449,7 +1874,7 @@ class Engine:
             # whatever was being listened to minutes ago, so the strongest
             # thing in the window is reported instead - true, and about the
             # only meaningful level for a band of half-microsecond bursts.
-            listening = self._adsb is None
+            listening = self._adsb is None and self._hd is None
             squelch = self._demod.squelch if listening else None
             self._mailbox.put(
                 DisplayFrame(
@@ -1471,13 +1896,33 @@ class Engine:
                         if listening
                         else float(np.max(spectrum_db))
                     ),
-                    bandwidth_hz=self._demod.bandwidth_hz,
+                    # During an HD session the passband marker covers the
+                    # whole hybrid signal - the analog core plus both digital
+                    # sidebands - which is the clearest explanation the
+                    # display can give of where the extra sound is coming
+                    # from. The demodulator's own figure is for a window that
+                    # is not currently being used.
+                    bandwidth_hz=(
+                        HD_BANDWIDTH_HZ
+                        if self._hd is not None
+                        else self._demod.bandwidth_hz
+                    ),
                     squelch_open=None if squelch is None else squelch.is_open,
                     audio_latency_s=sink.latency_s,
                     underruns=sink.underruns,
                     ring_overruns=reader.ring.overruns,
                     agc_gain_db=self.audio.agc.gain_db if self.audio.agc_enabled else 0.0,
-                    rds=None if self._rds is None else self._rds.snapshot(),
+                    # The analog path is not running during an HD session,
+                    # so whatever the RDS receiver last decoded is minutes
+                    # old. The digital signal carries the same information
+                    # and carries it better; `hd` is where the screen reads
+                    # it from.
+                    rds=(
+                        None
+                        if self._rds is None or self._hd is not None
+                        else self._rds.snapshot()
+                    ),
+                    hd=None if self._hd is None else self._hd.snapshot(),
                     stereo=self._stereo_out,
                 )
             )
