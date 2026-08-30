@@ -13,8 +13,19 @@ the user's scroll position, and slam shut anything they were reading.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from urllib.parse import quote
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Signal as QtSignal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ...decode.adsb import Aircraft
 from ...scan.classifier import Strength
@@ -27,6 +38,11 @@ QFrame#planeCard {
     background: #10151c; border: 1px solid #1d232b; border-radius: 6px;
 }
 QFrame#planeCard:hover { border-color: #2b323b; }
+/* The one the user picked out on the map. A dynamic property rather than a
+   second object name, so the rest of the rules keep applying to it. */
+QFrame#planeCard[picked="true"] {
+    background: #131e28; border-color: #5ad1ff;
+}
 QLabel#planeIcon { font-size: 22px; }
 QLabel#planeTitle { color: #e6edf3; font-size: 15px; font-weight: 600; }
 QLabel#planeDetail { color: #8b98a5; font-size: 12px; }
@@ -35,7 +51,28 @@ QLabel#planeGround {
     color: #0b0e13; background: #8b98a5; border-radius: 3px;
     padding: 0px 5px; font-size: 10px; font-weight: 600;
 }
+QPushButton#planeLookup {
+    background: transparent; color: #8b98a5;
+    border: 1px solid #2b323b; border-radius: 4px;
+    padding: 3px 10px; font-size: 11px; font-weight: 600;
+}
+QPushButton#planeLookup:hover { color: #cbd5e0; border-color: #3d4652; }
 """
+
+# Where the Lookup button goes. FlightAware takes the ICAO address straight
+# off the air and redirects to whatever it knows about that airframe, which
+# is what makes it the right target: every aircraft on this screen has an
+# address, and only some of them have said a callsign. It is free to read
+# without an account, and the redirect endpoint is the one dump1090's own
+# web interface has pointed at for years, so it is the least likely of the
+# candidates to move. Flightradar24 was the alternative and wants a session
+# and a good deal more JavaScript for the same answer.
+#
+# This does not break the rule that nothing is fetched while the app is
+# running: the app fetches nothing, it hands a URL to the browser the user
+# already has and the request is theirs, made deliberately, one aircraft at
+# a time.
+LOOKUP_BASE = "https://flightaware.com/live/modes"
 
 # Eight points is as fine as a heading is worth putting in words. The number
 # is there too, for anyone who wants it.
@@ -124,6 +161,26 @@ def strength_from_rssi(rssi_dbfs: float) -> Strength:
     return Strength.WEAK
 
 
+def lookup_url(address: str, callsign: str | None = None) -> str:
+    """Where to send the browser to read about this aircraft.
+
+    The address is the query and the callsign is a hint: an airframe is
+    identified by its ICAO address whatever flight it is operating, and the
+    callsign narrows the answer to today's flight when the aircraft has said
+    one. Every aircraft on the screen has an address, so the button is never
+    offered against nothing.
+
+    Pure, so that the one thing that can go quietly wrong here - a URL that
+    is subtly malformed and lands on a search page instead of an aircraft -
+    is checked without opening a browser.
+    """
+    code = quote(address.strip().upper(), safe="")
+    ident = (callsign or "").strip().upper()
+    if ident:
+        return f"{LOOKUP_BASE}/{code}/ident/{quote(ident, safe='')}/redirect"
+    return f"{LOOKUP_BASE}/{code}/redirect"
+
+
 def summary_line(aircraft: Aircraft) -> str:
     """Altitude and speed on one line, with whichever half is known."""
     parts = [
@@ -155,6 +212,11 @@ def heard_line(aircraft: Aircraft, level: Level) -> str:
 
 class AircraftCard(QFrame):
     """One aircraft: who it is, where it is, and how well it is being heard."""
+
+    # Clicked anywhere that is not the Lookup button. The map and the list
+    # are two views of one selection, so picking a row highlights the symbol
+    # for the same reason picking a symbol scrolls to the row.
+    chosen = QtSignal(object)
 
     def __init__(
         self,
@@ -202,10 +264,21 @@ class AircraftCard(QFrame):
         column.addWidget(self.heard)
         outer.addLayout(column, 1)
 
+        side = QVBoxLayout()
+        side.setSpacing(8)
+        side.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.bars = StrengthBars(strength_from_rssi(aircraft.rssi_dbfs))
-        outer.addWidget(self.bars, 0, Qt.AlignmentFlag.AlignTop)
+        side.addWidget(self.bars, 0, Qt.AlignmentFlag.AlignRight)
+        self.lookup = QPushButton("Lookup")
+        self.lookup.setObjectName("planeLookup")
+        self.lookup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lookup.clicked.connect(self._lookup_clicked)
+        side.addWidget(self.lookup)
+        side.addStretch(1)
+        outer.addLayout(side)
 
         self._latest = aircraft
+        self._picked = False
         self.update_from(aircraft)
 
     def update_from(self, aircraft: Aircraft) -> None:
@@ -227,6 +300,38 @@ class AircraftCard(QFrame):
         self.position.setVisible(bool(position))
         self.heard.setText(heard_line(aircraft, self.level))
         self.bars.set_strength(strength_from_rssi(aircraft.rssi_dbfs))
+        self.lookup.setToolTip(
+            f"Open {aircraft.label} on FlightAware in your web browser. "
+            "This is the one thing in the app that uses the internet, and it "
+            "only happens when you press it."
+        )
+
+    # -- selection ---------------------------------------------------------
+
+    def set_picked(self, picked: bool) -> None:
+        """Highlight this row, or stop highlighting it."""
+        if picked == self._picked:
+            return
+        self._picked = picked
+        # Qt only re-reads a property selector when told to. Without this the
+        # stylesheet is correct and the card never changes colour.
+        self.setProperty("picked", "true" if picked else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    @property
+    def picked(self) -> bool:
+        return self._picked
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.chosen.emit(self.icao)
+        super().mousePressEvent(event)
+
+    def _lookup_clicked(self) -> None:
+        QDesktopServices.openUrl(
+            QUrl(lookup_url(self._latest.address, self._latest.callsign))
+        )
 
     def set_level(self, level: Level) -> None:
         # Re-rendered here rather than left to the next snapshot: reception
@@ -237,11 +342,13 @@ class AircraftCard(QFrame):
 
 
 __all__ = [
+    "LOOKUP_BASE",
     "AircraftCard",
     "age_text",
     "altitude_text",
     "compass",
     "heard_line",
+    "lookup_url",
     "position_text",
     "speed_text",
     "strength_from_rssi",

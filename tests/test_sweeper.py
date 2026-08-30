@@ -21,6 +21,7 @@ from bettersdr.scan.sweeper import (
     EDGE_GUARD,
     TUNE_OFFSET_HZ,
     Sweeper,
+    SweepRange,
     plan_steps,
     run_sweep,
     usable_span,
@@ -323,3 +324,117 @@ def test_no_frequency_in_a_range_falls_between_two_tiles():
         # And whichever step owns it can actually see it.
         tuned = owned[0] + TUNE_OFFSET_HZ
         assert abs(hz - tuned) <= rate * EDGE_GUARD, f"{hz} Hz is owned but discarded"
+
+
+# -- sweeping several stretches of dial at once ------------------------------
+# The Expert discovery screen lets several ranges be selected together, and
+# they do not share a window: the AM band has to be measured through 240 kHz
+# and FM through 2.4 MHz. So the rate travels with the range, and the caller
+# is obliged to put it in effect before each step is read.
+
+AM_LOW, AM_HIGH = 530_000, 1_700_000
+AM_RATE = 240_000
+
+
+def two_range_sweeper(**kwargs) -> Sweeper:
+    ranges = (
+        SweepRange(AM_LOW, AM_HIGH, AM_RATE),
+        SweepRange(FM_LOW, FM_HIGH, RATE),
+    )
+    return Sweeper(AM_LOW, AM_HIGH, AM_RATE, ranges=ranges, **kwargs)
+
+
+def test_a_multi_range_sweep_plans_every_range():
+    sweeper = two_range_sweeper()
+    expected = len(plan_steps(AM_LOW, AM_HIGH, AM_RATE)) + len(
+        plan_steps(FM_LOW, FM_HIGH, RATE)
+    )
+    assert len(sweeper.steps) == expected
+    assert sweeper.low_hz == AM_LOW
+    assert sweeper.high_hz == FM_HIGH
+
+
+def _rates_through(sweeper: Sweeper) -> list[float]:
+    rates = []
+    while not sweeper.complete:
+        rates.append(sweeper.current_rate)
+        sweeper.feed(synth.noise(sweeper.dwell_samples))
+    return rates
+
+
+def test_each_step_reports_the_window_it_has_to_be_measured_through():
+    rates = _rates_through(two_range_sweeper(passes=1))
+    assert set(rates) == {float(AM_RATE), float(RATE)}
+    # The narrow window first, because the ranges are swept in frequency
+    # order, and every step of it before the wide one begins.
+    changes = [b for a, b in zip(rates, rates[1:], strict=False) if a != b]
+    assert changes == [float(RATE)]
+
+
+def test_every_pass_pays_for_the_boundary_again():
+    """Worth knowing rather than worth avoiding: a change of window empties
+    the ring, so a selection spanning two window widths costs that once per
+    range per pass. Sweeping in frequency order is what keeps it to that."""
+    rates = _rates_through(two_range_sweeper(passes=3))
+    changes = [b for a, b in zip(rates, rates[1:], strict=False) if a != b]
+    assert len(changes) == 5  # two per pass, minus the one before the first
+
+
+def test_the_dwell_is_a_duration_not_a_sample_count():
+    """Anything sized for 2.4 MS/s is a latent bug; this is one of the places."""
+    sweeper = two_range_sweeper(fft_size=4096)
+    narrow = sweeper.dwell_samples
+    while sweeper.current_rate == AM_RATE:
+        sweeper.feed(synth.noise(sweeper.dwell_samples))
+    wide = sweeper.dwell_samples
+    assert narrow % 4096 == 0 and wide % 4096 == 0
+    assert wide > narrow
+    assert narrow / AM_RATE == pytest.approx(wide / RATE, rel=0.35)
+
+
+def test_a_sweep_of_two_ranges_finds_the_stations_in_both():
+    air = synth.Air(
+        {
+            1_000_000: synth.am_station(0.40),
+            94_900_000: synth.wfm_station(0.50),
+            101_100_000: synth.wfm_station(0.35),
+        },
+        rate=AM_RATE,
+    )
+    sweeper = two_range_sweeper(passes=2)
+    run_sweep(sweeper, air, settle_s=0.0, sleep=lambda _: None)
+    found = [signal.frequency_hz for signal in sweeper.signals()]
+    for wanted in (1_000_000, 94_900_000, 101_100_000):
+        assert any(abs(hz - wanted) < 30_000 for hz in found), (
+            f"{wanted / 1e6} MHz missing from {[hz / 1e6 for hz in found]}"
+        )
+    # The window really did change under it, rather than the whole sweep
+    # running at whichever rate it started on.
+    assert set(air.rates) == {float(AM_RATE), float(RATE)}
+
+
+def test_nothing_between_two_selected_ranges_is_reported():
+    """The gap is not swept, and a station reached into it must not be kept.
+
+    A step at the top of the AM range legitimately sees past 1.7 MHz - the
+    last step reaches beyond the range so there is no hole at the top - and
+    a signal out there was never asked for.
+    """
+    air = synth.Air({1_780_000: synth.am_station(0.60)}, rate=AM_RATE)
+    sweeper = two_range_sweeper(passes=2)
+    run_sweep(sweeper, air, settle_s=0.0, sleep=lambda _: None)
+    assert all(
+        signal.frequency_hz <= AM_HIGH or signal.frequency_hz >= FM_LOW
+        for signal in sweeper.signals()
+    )
+
+
+def test_a_source_that_cannot_change_window_is_refused_rather_than_misread():
+    class OneWidth:
+        def tune(self, hz: int) -> None: ...
+
+        def read(self, samples: int):
+            return synth.noise(samples)
+
+    with pytest.raises(ValueError, match="window"):
+        run_sweep(two_range_sweeper(), OneWidth(), settle_s=0.0)

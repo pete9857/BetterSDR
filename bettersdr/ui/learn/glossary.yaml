@@ -1263,7 +1263,47 @@ categories:
             rule book and the chart say, and it is the phrase to search for.
             The friendly name shows at every level, the official one from
             Standard upwards.
-        see: [band-plan, band, frequency]
+        see: [band-plan, band, frequency, trunked]
+
+      - slug: trunked
+        title: Trunked radio systems
+        summary: >
+          Systems where a conversation is given whichever frequency is free at
+          the time, so it never stays in one place.
+        also: [trunking, trunked, talkgroup, control channel, p25, dmr,
+          smartnet, ltr, digital voice]
+        body:
+          - >
+            On an ordinary system each group of users has a [[channel]] of its
+            own and sits on it whether anybody is talking or not. A trunked
+            system pools a handful of frequencies and shares them out instead:
+            a computer at the tower hands a free one to each transmission as it
+            starts and takes it back the moment it ends. Twenty groups can run
+            on five frequencies, because they are almost never all talking at
+            once.
+          - >
+            One of the frequencies is the control channel, and it is the whole
+            trick. It carries a continuous data signal saying which group has
+            just been given which frequency, and every radio on the system
+            listens to it and retunes in step. A scanner that follows a trunked
+            system is doing the same thing: reading that data and jumping with
+            it.
+          - >
+            BetterSDR does not do that yet. It will show you the system -
+            [[scanning|Scan]] and [[monitor-mode|Monitor]] find the control
+            channel as something busy in every single sweep, with the voice
+            frequencies around it coming and going - but tuning to one of those
+            gives you a few seconds of one conversation and then a few seconds
+            of an unrelated one. [[voice-detection]] calls the control channel
+            Data, which is exactly what it is.
+          - >
+            Most of them are digital as well, which is a second obstacle
+            rather than the same one: P25, DMR and NXDN carry speech as data,
+            and this app cannot decode any of them, encrypted or not. In the US
+            they sit mostly in the 800 and 900 MHz allocations, with public
+            safety on the 700 MHz band too, and the ribbon above the
+            [[spectrum]] names those stretches from the [[band-plan|band plan]].
+        see: [channel, monitor-mode, voice-detection, scanning, band-plan]
 
       - slug: unmodulated-carrier
         title: Unmodulated carrier
@@ -1320,7 +1360,109 @@ categories:
             frequency reads like a dial. Grouped by type puts each kind
             together, with the kinds ordered by their strongest member so real
             stations are not buried under whatever happens to be most numerous.
-        see: [scanning, classification]
+        see: [scanning, classification, monitor-mode]
+
+      - slug: monitor-mode
+        title: Monitor
+        summary: >
+          Watching a band for as long as you like, instead of photographing it
+          once.
+        also: [monitoring, scanner, activity, busiest, duty cycle, hits]
+        where: The Discover screen, next to Scan, at every level.
+        body:
+          - >
+            [[scanning|Scan]] answers "what is transmitting right now". That is
+            the right question for [[wfm|broadcast]] bands, where
+            everything is on all the time, and close to useless everywhere
+            else. A fire crew's channel is silent for fifty-nine minutes an
+            hour. A marine channel carries four seconds of somebody calling a
+            bridge. Sweep once and you get whatever happened to be keyed in
+            that half second, which is usually nothing.
+          - >
+            Monitor sweeps the same band over and over and keeps a tally. Each
+            channel's card says how many sweeps it has been heard in and what
+            share of them that is, so a channel used twice an hour and one
+            used constantly stop looking the same. Leave it running for as long
+            as you like - the longer it runs, the more the numbers mean.
+          - >
+            Between sweeps it stops on whatever is busy and actually listens,
+            which is the only way to tell a conversation from a pager. See
+            [[voice-detection]] for what it can tell apart, and
+            [[hold-and-skip]] for what to do when it stops somewhere you do or
+            do not want.
+          - >
+            The radio is on loan for the whole session, exactly as it is during
+            a scan, and goes back to the station you were listening to when you
+            stop or leave the screen.
+        see: [voice-detection, hold-and-skip, scanning, sensitivity, sort-order]
+
+      - slug: voice-detection
+        title: Voice detection
+        summary: >
+          Listening to a busy channel for a moment to hear whether it is
+          somebody talking.
+        also: [voice, speech, data, static, tone, music, what it sounds like]
+        where: The Discover screen, while Monitor is running.
+        body:
+          - >
+            A picture of a signal cannot tell you what is on it. A pager
+            transmission and somebody talking sit on channels that look
+            identical - the same width, the same steadiness, the same part of
+            the dial - so the only way to know is to demodulate the channel and
+            listen. That is what Monitor does for about a second each time it
+            stops somewhere.
+          - >
+            Five things can come back, and each is recognised by something you
+            would notice too. **Voice** starts and stops: its loudness swings
+            several decibels a few times a second - syllables - and underneath
+            that it has a pitch that wanders. **Music** is also pitched but
+            never pauses that way. A **steady tone** is one note that never
+            changes. **Data** is constant like a tone but spread across the
+            channel instead of sitting on one note, and never twice on the same
+            note - a pager, telemetry, or a digital voice mode this app cannot
+            decode. **Static** is flat and featureless, which is what an empty
+            channel sounds like with the squelch open.
+          - >
+            The card shows what it heard, with a question mark after it when
+            there was not enough sound to be sure. Hover it to see the
+            reasoning. Monitor only stops and plays for voice and music -
+            knowing a channel carries data is worth having, and listening to
+            it is not.
+          - >
+            It can be wrong, and the honest cases are the useful ones. A very
+            weak signal is mostly noise whatever is on it; an encrypted or
+            digital voice channel is data as far as this is concerned, because
+            that is genuinely what it sounds like.
+        see: [monitor-mode, hold-and-skip, squelch, classification, trunked]
+
+      - slug: hold-and-skip
+        title: Hold and Skip
+        summary: >
+          Making Monitor stay on a channel, or stop offering one.
+        also: [hold, skip, lockout, playing]
+        where: On each card, while Monitor is running.
+        body:
+          - >
+            When Monitor finds somebody talking it stays on that channel and
+            plays it, then goes back to sweeping once the channel has been
+            quiet for a few seconds. The delay is deliberate: a conversation is
+            short transmissions with gaps between them, and leaving on the
+            first gap means arriving back too late for the reply.
+          - >
+            **Hold** stops that. The radio stays where it is until you press it
+            again, however quiet the channel gets. Use it when you can hear
+            that something is worth staying for and the app cannot - a weak
+            signal, a long pause, a language it has no opinion about.
+          - >
+            **Skip** is the opposite: leave now, and stop coming back. Aimed at
+            the channel that technically is a voice and is not what you wanted -
+            a repeater's identifier, a hold tone with speech in it, somebody's
+            baby monitor. The channel stays on the list and keeps being counted;
+            the radio just stops going there. Press it again to undo.
+          - >
+            Neither changes what the dial is tuned to. Press **Listen** on a
+            card to leave Monitor and tune there properly.
+        see: [monitor-mode, voice-detection, squelch]
 
   - name: Decoding
     articles:

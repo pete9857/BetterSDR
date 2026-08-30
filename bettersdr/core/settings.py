@@ -107,6 +107,22 @@ DEFAULTS: dict[str, Any] = {
     # sweep that missed something.
     "scan_sort": "strength",
     "hidden_kinds": [],
+    # Which stretches of dial the Expert range picker has ticked, by span.
+    # Remembered by span rather than by name because two of them are both
+    # called "Federal government" and a name is the field most likely to be
+    # reworded between releases.
+    "scan_ranges": [],
+    # How the *monitor* list is ordered. Remembered separately from the sweep
+    # because the two screens answer different questions and their best
+    # answers differ: a sweep is strongest-first, the way a Wi-Fi picker
+    # orders networks, and a monitor is busiest-first, because how often a
+    # channel is up is the whole reason for watching a band rather than
+    # photographing it.
+    "monitor_sort": "activity",
+    # Whether the monitor list is showing only the channels somebody has been
+    # heard talking on. Off by default: a list that starts empty because a
+    # filter is on is the one failure this screen cannot afford.
+    "monitor_voice_only": False,
 }
 
 

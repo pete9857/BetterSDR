@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -138,12 +138,40 @@ def plan_steps(
     return tuple(int(round(first + index * usable)) for index in range(count))
 
 
+@dataclass(frozen=True)
+class SweepRange:
+    """One stretch of dial to sweep, and the window to sweep it through.
+
+    A scan used to be one range and therefore one window width. Selecting
+    several stretches at once breaks that: the AM broadcast band has to be
+    swept at 240 kS/s, because a 2.4 MHz window there puts the upconverter's
+    own oscillator leak in the middle of the picture, and FM broadcast has to
+    be swept at 2.4 MS/s, because a window narrower than one FM station
+    measures every width and shape in the band wrong. Taking the narrower of
+    the two for both would be twelve times slower *and* wrong about half the
+    selection, so the rate travels with the range rather than with the sweep.
+    """
+
+    low_hz: float
+    high_hz: float
+    sample_rate: float
+
+    @property
+    def width_hz(self) -> float:
+        return self.high_hz - self.low_hz
+
+
 class SweepSource(Protocol):
     """Whatever the sweeper is stepping: a real reader, or a synthetic scene."""
 
     def tune(self, hz: int) -> None: ...
 
     def read(self, samples: int) -> np.ndarray | None: ...
+
+    # Optional. A source that can only produce one window width simply does
+    # not have it, and `run_sweep` then refuses a sweep that would need one -
+    # rather than reading the wrong width and reporting it as a measurement.
+    # def set_sample_rate(self, hz: float) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -152,6 +180,9 @@ class SweepResult:
 
     low_hz: float
     high_hz: float
+    # The window the sweep began on. A sweep of several stretches of dial may
+    # have changed it on the way - the ranges are what carry that - so this is
+    # the rate the picture starts in, not a claim about all of it.
     sample_rate: float
     frequencies: np.ndarray
     spectrum_db: np.ndarray
@@ -206,6 +237,11 @@ class Sweeper:
     `current_hz`, hands over a block of IQ, and repeats until `complete`. That
     keeps the whole of the scan's logic testable against synthetic air, and
     lets the engine run it on the DSP thread it already owns.
+
+    A sweep may cover several disjoint stretches of dial, each through its own
+    window - see `SweepRange` and `ranges`. The caller has one extra
+    obligation for that: `current_rate` is the window the next step has to be
+    measured through, and it must be in effect before the block is read.
     """
 
     def __init__(
@@ -221,10 +257,8 @@ class Sweeper:
         region: str = DEFAULT_REGION,
         detect_hd: bool = True,
         tune_offset_hz: float = TUNE_OFFSET_HZ,
+        ranges: Sequence[SweepRange] | None = None,
     ) -> None:
-        self.low_hz = float(low_hz)
-        self.high_hz = float(high_hz)
-        self.sample_rate = float(sample_rate)
         self.threshold_db = float(threshold_db)
         self.overlap = float(overlap)
         self.dwell_s = float(dwell_s)
@@ -232,12 +266,55 @@ class Sweeper:
         self.passes = max(1, int(passes))
         self.region = region
         self.detect_hd = bool(detect_hd)
+        self.fft_size = int(fft_size)
 
-        self.steps = plan_steps(
-            low_hz, high_hz, sample_rate, overlap, self.tune_offset_hz
+        # One range unless told otherwise, which is what every caller before
+        # multi-band selection asked for and what the three positional
+        # arguments still mean.
+        self.ranges: tuple[SweepRange, ...] = (
+            tuple(ranges)
+            if ranges
+            else (SweepRange(float(low_hz), float(high_hz), float(sample_rate)),)
         )
-        self.tile_hz = usable_span(sample_rate, overlap, self.tune_offset_hz)
-        self._spectrum = Spectrum(fft_size=fft_size, sample_rate=self.sample_rate)
+        # The extent of the whole sweep, for the picture and the result. Not
+        # what anything is clipped against: a detection belongs to the range
+        # whose step found it, and a selection of AM plus FM has 86 MHz
+        # between the two that nothing was ever asked to look at.
+        self.low_hz = min(r.low_hz for r in self.ranges)
+        self.high_hz = max(r.high_hz for r in self.ranges)
+        self.sample_rate = self.ranges[0].sample_rate
+
+        # Steps for every range, in the order the tuner will visit them, each
+        # remembering which range it belongs to - which is what says how wide
+        # the window is while it is being measured, and what the detections
+        # from it are clipped to.
+        steps: list[int] = []
+        owners: list[int] = []
+        for index, span in enumerate(self.ranges):
+            tiles = plan_steps(
+                span.low_hz,
+                span.high_hz,
+                span.sample_rate,
+                overlap,
+                self.tune_offset_hz,
+            )
+            steps.extend(tiles)
+            owners.extend([index] * len(tiles))
+        self.steps = tuple(steps)
+        self._owner = tuple(owners)
+        self._tile_hz = tuple(
+            usable_span(span.sample_rate, overlap, self.tune_offset_hz)
+            for span in self.ranges
+        )
+        # One transform per distinct rate rather than one per range: the
+        # design depends on the rate and nothing else, and a selection of
+        # sixty stretches of dial is two or three windows between them.
+        self._spectra = {
+            span.sample_rate: Spectrum(
+                fft_size=self.fft_size, sample_rate=span.sample_rate
+            )
+            for span in self.ranges
+        }
         # One pass is one sweep as far as the persistence gate is concerned.
         self._persistence = Persistence(
             needed=min(2, self.passes), window=self.passes
@@ -264,10 +341,39 @@ class Sweeper:
 
     @property
     def dwell_samples(self) -> int:
-        """Whole PSD frames, so the dwell divides evenly into what is measured."""
-        wanted = int(self.sample_rate * self.dwell_s)
-        frames = max(1, round(wanted / self._spectrum.fft_size))
-        return frames * self._spectrum.fft_size
+        """Whole PSD frames, so the dwell divides evenly into what is measured.
+
+        Stated as a duration and turned into samples at the rate of the step
+        about to be measured, not at the rate the sweep started on - the same
+        rule everything else sized for 2.4 MS/s has to follow.
+        """
+        wanted = int(self.current_rate * self.dwell_s)
+        frames = max(1, round(wanted / self.fft_size))
+        return frames * self.fft_size
+
+    @property
+    def current_range_index(self) -> int:
+        """Which of the selected stretches this step belongs to."""
+        return self._owner[min(self._step_index, len(self.steps) - 1)]
+
+    @property
+    def current_range(self) -> SweepRange:
+        return self.ranges[self.current_range_index]
+
+    @property
+    def current_rate(self) -> float:
+        """The window this step has to be measured through.
+
+        The caller changes the dongle's rate to match before reading, which
+        is why this is public: only the engine can make that call, and only
+        between two reads.
+        """
+        return self.current_range.sample_rate
+
+    @property
+    def tile_hz(self) -> float:
+        """How much spectrum the current step is responsible for."""
+        return self._tile_hz[self.current_range_index]
 
     @property
     def current_tile_hz(self) -> int:
@@ -300,33 +406,43 @@ class Sweeper:
         """Measure one dwell at `current_hz` and move to the next step."""
         if self.complete:
             return
-        spectrum_db = self._spectrum.process(iq)
+        span = self.current_range
+        spectrum_db = self._spectra[span.sample_rate].process(iq)
         if spectrum_db.size:
-            self._measure(spectrum_db, float(self.current_hz), self.current_tile_hz)
+            self._measure(
+                spectrum_db, float(self.current_hz), self.current_tile_hz, span
+            )
 
         self._step_index += 1
         if self._step_index >= len(self.steps):
             self._end_pass()
 
     def _measure(
-        self, spectrum_db: np.ndarray, center: float, tile_center: float
+        self,
+        spectrum_db: np.ndarray,
+        center: float,
+        tile_center: float,
+        span: SweepRange,
     ) -> None:
         """Find and measure everything in one step's dwell.
 
         `center` is where the dongle actually sat, which is what turns a bin
         index into a frequency. `tile_center` is the stretch this step owns,
         which is what stops two overlapping steps reporting the same station.
+        `span` is the selected range the step belongs to: what its window
+        width is, and what the detections from it are clipped to.
         """
-        bin_width = self._spectrum.bin_width_hz
+        bin_width = self._spectra[span.sample_rate].bin_width_hz
+        tile_hz = self._tile_hz[self._owner[min(self._step_index, len(self.steps) - 1)]]
         self.last_spectrum_db = spectrum_db
         self.last_center_hz = center
         self._picture[int(tile_center)] = self._trusted_slice(
-            spectrum_db, center, tile_center, bin_width
+            spectrum_db, center, tile_center, bin_width, span, tile_hz
         )
 
-        guard = self.sample_rate * EDGE_GUARD
-        tile_low = tile_center - self.tile_hz / 2.0
-        tile_high = tile_center + self.tile_hz / 2.0
+        guard = span.sample_rate * EDGE_GUARD
+        tile_low = tile_center - tile_hz / 2.0
+        tile_high = tile_center + tile_hz / 2.0
         for detection in detect(
             spectrum_db, bin_width, center_hz=center, threshold_db=self.threshold_db
         ):
@@ -337,7 +453,7 @@ class Sweeper:
                 continue
             if abs(offset) > guard:
                 continue
-            if not self.low_hz <= detection.center_hz <= self.high_hz:
+            if not span.low_hz <= detection.center_hz <= span.high_hz:
                 continue
             self._pass_sightings.append(
                 _Sighting(
@@ -376,6 +492,8 @@ class Sweeper:
         center: float,
         tile_center: float,
         bin_width: float,
+        span: SweepRange,
+        tile_hz: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         """The middle of a step's window, which is the part the picture keeps.
 
@@ -387,9 +505,9 @@ class Sweeper:
         offsets = (np.arange(bins) - bins // 2) * bin_width
         absolute = center + offsets
         keep = (
-            (np.abs(absolute - tile_center) <= self.tile_hz / 2.0)
-            & (absolute >= self.low_hz)
-            & (absolute <= self.high_hz)
+            (np.abs(absolute - tile_center) <= tile_hz / 2.0)
+            & (absolute >= span.low_hz)
+            & (absolute <= span.high_hz)
         )
         return (absolute[keep], spectrum_db[keep])
 
@@ -529,9 +647,19 @@ def run_sweep(
     rest of the DSP thread's work; this is the straight-line version, used by
     the tests and by anything scanning outside the GUI.
     """
+    set_rate = getattr(source, "set_sample_rate", None)
+    if set_rate is None and len({r.sample_rate for r in sweeper.ranges}) > 1:
+        raise ValueError(
+            "this sweep changes window width between ranges, and the source "
+            "cannot change it"
+        )
+    rate: float | None = None
     while not sweeper.complete:
         if should_stop is not None and should_stop():
             break
+        if set_rate is not None and sweeper.current_rate != rate:
+            rate = sweeper.current_rate
+            set_rate(rate)
         source.tune(sweeper.current_hz)
         if settle_s > 0:
             sleep(settle_s)
@@ -550,6 +678,7 @@ __all__ = [
     "DEFAULT_SETTLE_S",
     "TUNE_OFFSET_HZ",
     "SweepProgress",
+    "SweepRange",
     "SweepResult",
     "SweepSource",
     "Sweeper",

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 from pyqtgraph.functions import arrayToQPath
 from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import Signal as QtSignal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -82,6 +83,14 @@ CITY_COLOUR = "#46586a"
 CITY_LABEL_COLOUR = "#6a8094"
 # The dark outline that keeps an aircraft symbol legible against either.
 SYMBOL_EDGE_COLOUR = "#080d13"
+# The ring drawn round the aircraft the user has picked out, and the same
+# blue the rest of the app uses for the thing it is currently talking about.
+SELECTED_COLOUR = "#5ad1ff"
+# How near a click has to land to count as being on an aircraft. The symbol
+# is about 16 px across and a finger-sized target is bigger than the thing
+# it is pointing at, so this is deliberately generous - but not so generous
+# that two aircraft in formation become one target.
+HIT_RADIUS_PX = 18.0
 # The graticule is drawn as a wash rather than a colour, so that one number
 # reads the same over water and over land.
 GRATICULE_COLOUR = QColor(255, 255, 255, 13)
@@ -276,6 +285,37 @@ def update_trails(
     return trails
 
 
+def nearest_aircraft(
+    projection: Projection,
+    aircraft: Sequence[Aircraft],
+    x: float,
+    y: float,
+    radius: float = HIT_RADIUS_PX,
+) -> int | None:
+    """Which aircraft a click at `x, y` landed on, or `None` for empty map.
+
+    Pure, and tested without a window, because the two things it can get
+    wrong both look ordinary on screen: picking the aircraft *underneath* the
+    one the user aimed at, and picking one that is nowhere near the pointer
+    because nothing else was closer. The radius is what stops the second -
+    a click on open water is a click on nothing, not on whichever aircraft
+    happens to be least far away.
+    """
+    best: int | None = None
+    nearest = radius * radius
+    for plane in aircraft:
+        if not plane.has_position:
+            continue
+        px, py = projection.to_pixel(float(plane.latitude), float(plane.longitude))
+        distance = (px - x) ** 2 + (py - y) ** 2
+        # `<=` so that where two symbols overlap exactly the later one wins,
+        # which is the one drawn on top and therefore the one aimed at.
+        if distance <= nearest:
+            nearest = distance
+            best = plane.icao
+    return best
+
+
 def city_dot(population: int) -> float:
     """How wide to draw a place, in pixels.
 
@@ -411,11 +451,21 @@ def land_arrays(
 class PlaneMap(QWidget):
     """A plan view of the aircraft that have reported where they are."""
 
+    # The ICAO address of the aircraft the user picked out, or `None` where
+    # they clicked empty sky. Emitted rather than acted on, the same shape as
+    # every other crossing in `ui/`: the map does not know a list exists, and
+    # the list does not know it is being scrolled by a map.
+    selectionChanged = QtSignal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(220)
         self.setAutoFillBackground(False)
+        # So the pointer can change over an aircraft. A symbol that responds
+        # to a click has to look as though it will, or nobody clicks it.
+        self.setMouseTracking(True)
         self._aircraft: tuple[Aircraft, ...] = ()
+        self._selected: int | None = None
         # Where each aircraft has been, oldest first, keyed by ICAO address.
         # Held here rather than in the decoder because it is a display
         # memory: what the map has drawn, not what the receiver knows.
@@ -432,13 +482,74 @@ class PlaneMap(QWidget):
         """Take a new sky. Cheap enough to call at the screen's refresh rate."""
         self._aircraft = tuple(aircraft)
         update_trails(self._trails, self._aircraft)
+        # An aircraft that has flown out of range takes the selection with
+        # it, and says so, rather than leaving a highlight pointing at a row
+        # that is about to be removed from underneath it.
+        if self._selected is not None and not any(
+            plane.icao == self._selected for plane in self._aircraft
+        ):
+            self._selected = None
+            self.selectionChanged.emit(None)
         self.update()
 
     def clear(self) -> None:
         self._aircraft = ()
         self._trails.clear()
         self._projection = None
+        if self._selected is not None:
+            self._selected = None
+            self.selectionChanged.emit(None)
         self.update()
+
+    # -- selection ---------------------------------------------------------
+
+    @property
+    def selected(self) -> int | None:
+        """The ICAO address that is highlighted, or `None`."""
+        return self._selected
+
+    def set_selected(self, icao: int | None) -> None:
+        """Highlight one aircraft, without saying so.
+
+        Silent by design: this is how the *list* tells the map what has been
+        picked, and a map that echoed it straight back would be the two panes
+        selecting each other for ever.
+        """
+        if icao == self._selected:
+            return
+        self._selected = icao
+        self.update()
+
+    def _hit(self, x: float, y: float) -> int | None:
+        if self._projection is None:
+            return None
+        return nearest_aircraft(self._projection, self._aircraft, x, y)
+
+    # -- input -------------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        position = event.position()
+        icao = self._hit(position.x(), position.y())
+        # A click on empty sky clears the selection. Somewhere to put a
+        # highlight down matters as much as somewhere to pick one up.
+        if icao != self._selected:
+            self._selected = icao
+            self.update()
+            self.selectionChanged.emit(icao)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        position = event.position()
+        over = self._hit(position.x(), position.y()) is not None
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if over
+            else Qt.CursorShape.ArrowCursor
+        )
+        super().mouseMoveEvent(event)
 
     @property
     def plotted(self) -> int:
@@ -629,6 +740,17 @@ class PlaneMap(QWidget):
     ) -> None:
         x, y = projection.to_pixel(float(plane.latitude), float(plane.longitude))
         colour = altitude_colour(plane.altitude_ft, plane.on_ground)
+        picked = plane.icao == self._selected
+
+        if picked:
+            # A ring rather than a different symbol colour: colour already
+            # means altitude here, and a highlight that overrode it would
+            # take a field away to add one.
+            halo = QColor(SELECTED_COLOUR)
+            halo.setAlpha(38)
+            painter.setBrush(halo)
+            painter.setPen(QPen(QColor(SELECTED_COLOUR), 1.6))
+            painter.drawEllipse(QPointF(x, y), 13.0, 13.0)
 
         painter.save()
         painter.translate(x, y)
@@ -673,7 +795,9 @@ class PlaneMap(QWidget):
         left = x + 9.0
         if left + widest > projection.width - 4.0:
             left = x - 9.0 - widest
-        painter.setPen(QPen(QColor("#cbd5e0")))
+        painter.setPen(
+            QPen(QColor(SELECTED_COLOUR) if picked else QColor("#cbd5e0"))
+        )
         painter.drawText(QPointF(left, y + 1.0), plane.label)
         if detail:
             painter.setPen(QPen(QColor("#8b98a5")))
@@ -704,6 +828,7 @@ class PlaneMap(QWidget):
 
 
 __all__ = [
+    "HIT_RADIUS_PX",
     "MIN_SPAN_NM",
     "TRAIL_POINTS",
     "NM_PER_DEGREE",
@@ -717,6 +842,7 @@ __all__ = [
     "graticule_step",
     "detail_level",
     "land_arrays",
+    "nearest_aircraft",
     "nice_number",
     "polyline_path",
     "scale_bar",

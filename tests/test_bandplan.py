@@ -361,3 +361,130 @@ def test_the_allocation_list_reaches_the_ends_of_the_dial():
 
     assert bandplan.official(MIN_TUNE_HZ) is not None
     assert bandplan.official(MAX_TUNE_HZ) is not None
+
+
+# -- the whole dial, as things to point the receiver at ----------------------
+# The Expert discovery screen replaces the handful of beginner-friendly band
+# chips with every stretch of dial the dongle can reach. The failure that
+# matters is a hole: a list that claims to be the whole spectrum and quietly
+# leaves out 700 MHz of it gives the reader no way to notice.
+
+
+def _coverage():
+    from bettersdr.core.device import MAX_TUNE_HZ, MIN_TUNE_HZ
+
+    return bandplan.coverage(MIN_TUNE_HZ, MAX_TUNE_HZ), MIN_TUNE_HZ, MAX_TUNE_HZ
+
+
+def test_coverage_leaves_no_stretch_of_the_dial_unlisted():
+    segments, low, high = _coverage()
+    edge = low
+    for segment in segments:
+        assert segment.start_hz <= edge, (
+            f"{segment.name} starts at {segment.start_hz} past a gap ending {edge}"
+        )
+        edge = max(edge, segment.end_hz)
+    assert edge == high
+
+
+def test_coverage_stays_inside_what_the_dongle_can_tune():
+    segments, low, high = _coverage()
+    for segment in segments:
+        assert low <= segment.start_hz < segment.end_hz <= high, segment.name
+
+
+def test_coverage_offers_the_bands_and_the_space_between_them():
+    segments, _, _ = _coverage()
+    named = {segment.name for segment in segments}
+    assert "FM Radio" in named
+    assert "Business and public safety" in named
+    assert "Federal government" in named
+    # A band brings its window preference with it; an allocation has none to
+    # bring, and the default plus `safe_sample_rate` is the answer there.
+    by_name = {segment.name: segment for segment in segments}
+    assert by_name["AM Radio"].sample_rate_hz == 240_000
+    assert by_name["Business and public safety"].sample_rate_hz is None
+    assert by_name["FM Radio"].band is not None
+    assert by_name["Federal government"].band is None
+
+
+def test_a_segment_is_identified_by_its_span_not_its_name():
+    """Two stretches are both called Federal government and they are not one."""
+    segments, _, _ = _coverage()
+    federal = [s for s in segments if s.name == "Federal government"]
+    assert len(federal) > 1
+    assert len({segment.key for segment in federal}) == len(federal)
+    assert len({segment.key for segment in segments}) == len(segments)
+
+
+def test_a_band_becomes_the_same_segment_the_coverage_list_holds():
+    segments, _, _ = _coverage()
+    fm = next(band for band in bandplan.load() if band.name == "FM Radio")
+    assert bandplan.Segment.of(fm).key in {segment.key for segment in segments}
+
+
+# -- turning a selection into something a sweep can be planned from ----------
+
+
+def test_touching_ranges_are_swept_as_one():
+    segments, _, _ = _coverage()
+    by_name = {segment.name: segment for segment in segments}
+    chosen = [
+        by_name["Business and public safety"],  # 150.8 - 156 MHz
+        by_name["Marine VHF"],  # 156 - 162.025 MHz, and it abuts
+    ]
+    planned = bandplan.sweep_ranges(chosen)
+    assert planned == ((150_800_000, 162_025_000, None),)
+
+
+def test_ranges_wanting_different_windows_are_never_merged():
+    """AM broadcast ends exactly where the fixed links above it begin."""
+    segments, _, _ = _coverage()
+    by_name = {segment.name: segment for segment in segments}
+    planned = bandplan.sweep_ranges(
+        [by_name["AM Radio"], by_name["Long-distance fixed links"]]
+    )
+    assert planned == (
+        (530_000, 1_700_000, 240_000),
+        (1_700_000, 1_800_000, None),
+    )
+
+
+def test_a_selection_is_planned_through_the_window_it_will_really_get():
+    """Grouping on the stated preference alone is not enough; see `rate_for`.
+
+    A merge moves a range's lower edge down, and how wide a window may be
+    depends on how close that edge comes to 0 Hz - so two stretches that
+    state no preference can still be given different windows, and joining
+    them would sweep one of them through the wrong one.
+    """
+    segments, _, _ = _coverage()
+    by_name = {segment.name: segment for segment in segments}
+    rate_for = lambda s: safe_sample_rate(  # noqa: E731
+        s.start_hz, preferred_hz=int(s.sample_rate_hz or DEFAULT_SAMPLE_RATE)
+    )
+    beacons = by_name["Beacons and travellers' information"]  # 500 - 530 kHz
+    links = by_name["Long-distance fixed links"]  # 1.7 - 1.8 MHz
+    assert rate_for(beacons) < rate_for(links)
+    planned = bandplan.sweep_ranges([beacons, links], rate_for=rate_for)
+    assert [rate for _, _, rate in planned] == [rate_for(beacons), rate_for(links)]
+
+
+def test_overlapping_ranges_are_swept_once():
+    """A nested band and its parent are one stretch of dial, not two."""
+    segments, _, _ = _coverage()
+    by_name = {segment.name: segment for segment in segments}
+    planned = bandplan.sweep_ranges(
+        [by_name["70 cm Amateur"], by_name["Remote Controls"]]
+    )
+    assert planned == ((420_000_000, 450_000_000, None),)
+
+
+def test_the_whole_dial_is_a_handful_of_ranges():
+    segments, low, high = _coverage()
+    rate_for = lambda s: safe_sample_rate(  # noqa: E731
+        s.start_hz, preferred_hz=int(s.sample_rate_hz or DEFAULT_SAMPLE_RATE)
+    )
+    planned = bandplan.sweep_ranges(segments, rate_for=rate_for)
+    assert sum(end - start for start, end, _ in planned) == high - low
+    assert len(planned) < len(segments)

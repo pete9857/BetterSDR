@@ -79,6 +79,10 @@ class AircraftView(QWidget):
         self.level = level
         self._cards: dict[int, AircraftCard] = {}
         self._order: tuple[int, ...] = ()
+        # The aircraft the user has picked out, on the map or in the list.
+        # One selection shared by both panes: two would drift apart within
+        # seconds and neither would be wrong on its own.
+        self._selected: int | None = None
 
         self._build()
         self.set_level(level)
@@ -127,10 +131,12 @@ class AircraftView(QWidget):
 
         self.map = PlaneMap()
         self.map.setToolTip(
-            "Everything that has said where it is, drawn to fit. There is no "
-            "street map underneath because nothing here is downloaded - what "
-            "is on screen is what the aerial received."
+            "Everything that has said where it is, drawn to fit. Click an "
+            "aircraft to find it in the list below. There is no street map "
+            "underneath because nothing here is downloaded - what is on "
+            "screen is what the aerial received."
         )
+        self.map.selectionChanged.connect(self._map_selected)
 
         self.list_area = QScrollArea()
         self.list_area.setWidgetResizable(True)
@@ -243,6 +249,56 @@ class AircraftView(QWidget):
             parts.append(f"{state.bad} unreadable")
         return "   ·   ".join(parts)
 
+    # -- selection ---------------------------------------------------------
+
+    def _map_selected(self, icao: object) -> None:
+        """A symbol on the map was clicked, or the map was clicked past one."""
+        self._apply_selection(icao if icao is None else int(icao), reveal=True)
+
+    def _card_chosen(self, icao: object) -> None:
+        """A row was clicked. The other half of the same selection.
+
+        Clicking a row does not scroll it - it is already under the pointer -
+        but it does light up the symbol, which is the answer to "which of
+        these dots is the one I am reading about".
+        """
+        self._apply_selection(int(icao), reveal=False)
+
+    def _apply_selection(self, icao: int | None, reveal: bool) -> None:
+        self._selected = icao
+        for address, card in self._cards.items():
+            card.set_picked(address == icao)
+        self.map.set_selected(icao)
+        if reveal and icao is not None:
+            self._reveal(icao)
+
+    def _reveal(self, icao: int) -> None:
+        """Bring the selected card into view, opening the list if it is shut.
+
+        The splitter can be dragged closed, and scrolling a pane nobody can
+        see is the same failure as not scrolling at all - so a click on the
+        map that has nowhere to land gives the list back its share first.
+        """
+        card = self._cards.get(icao)
+        if card is None:
+            return
+        sizes = self.split.sizes()
+        if len(sizes) == 2 and sizes[1] == 0:
+            total = sizes[0]
+            self.split.setSizes([int(total * 0.6), total - int(total * 0.6)])
+        # After the event loop has laid the list out: a card created on this
+        # same tick has no position yet, and scrolling to it would scroll to
+        # wherever the layout last had something.
+        QTimer.singleShot(0, lambda: self._scroll_to(icao))
+
+    def _scroll_to(self, icao: int) -> None:
+        # Looked up again rather than captured: a deferred call holding a
+        # widget the next snapshot has already deleted is an aircraft going
+        # out of range taking the app with it.
+        card = self._cards.get(icao)
+        if card is not None:
+            self.list_area.ensureWidgetVisible(card, 0, 40)
+
     # -- the list ----------------------------------------------------------
 
     def _show(self, aircraft: tuple[Aircraft, ...]) -> None:
@@ -264,6 +320,8 @@ class AircraftView(QWidget):
             card = self._cards.get(plane.icao)
             if card is None:
                 card = AircraftCard(plane, level=self.level)
+                card.chosen.connect(self._card_chosen)
+                card.set_picked(plane.icao == self._selected)
                 self._cards[plane.icao] = card
                 self.list_layout.insertWidget(self.list_layout.count() - 1, card)
             else:
@@ -292,6 +350,7 @@ class AircraftView(QWidget):
             card.deleteLater()
         self._cards.clear()
         self._order = ()
+        self._selected = None
         self.empty.setVisible(True)
         self.map.clear()
 

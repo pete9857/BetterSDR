@@ -28,7 +28,20 @@ widgets offscreen but not yet with a dongle attached).
 **The Learn tab complete** (2026-08-29): 72 articles, a searchable
 home page, and every control caption on the listening and Discover
 screens a link into it. Driven through the real widgets offscreen;
-not yet read by a beginner, which is the only test that counts |
+not yet read by a beginner, which is the only test that counts.
+**Monitor mode and voice detection complete** (2026-08-30):
+a sweep that never ends, an activity ledger, and a scanner that
+stops on anything that turns out to be somebody talking. Tested
+against synthetic air through the real engine and driven through
+the real widgets offscreen; **not yet run against a real band**,
+which is the only test that counts.
+**The whole dial on the Discover screen complete** (2026-08-30):
+at Expert the band chips become a scrolling list of all 63
+stretches of spectrum the dongle can reach - the bands and, between
+them, who the space is licensed to - and any number of them can be
+scanned or monitored together. Driven through the real widgets
+offscreen and through the real engine against synthetic air; **not
+yet swept against a real band** |
 | **5 — Packaging** | Not started |
 
 ### Driver state on this machine
@@ -188,12 +201,16 @@ the UI now; the block after this one is what that cost.)
   runtime, no `libnrsc5.dll`. MSVC **cannot** build it; the toolchain is
   MSYS2, and it must build from a short path or faad2's nested try-compile
   directories overflow `MAX_PATH` and report a missing object file instead.
-- **The process boundary is a licensing requirement, not a convenience.**
-  Aggregation over pipes leaves BetterSDR's licence alone; loading
-  `libnrsc5` in-process would be linking and would place the whole app under
-  GPL-3. Amendment 3 chose the subprocess for codec and crash-isolation
-  reasons - this is the third and hardest one. BetterSDR still has no
-  `LICENSE` file, which is the field this turns on at Phase 5.
+- **The process boundary is no longer a licensing requirement, and the two
+  reasons that remain are the ones that came first.** BetterSDR is
+  **GPL-3.0-or-later** as of 2026-08-30, so linking `libnrsc5` would now be
+  permitted - what keeps the subprocess is Amendment 3's original pair: the
+  HDC codec is proprietary with no public spec, and a decoder that can crash
+  must not be able to take the radio down with it. Distributing
+  `nrsc5.exe` in a build still carries GPL-3 section 6: ship its `COPYING`
+  (vendored) and name the revision it was built from. `LICENSE` and
+  `THIRD-PARTY.md` are the record; the latter also lists what a packaged
+  build owes Qt (LGPL-3) and librtlsdr (GPL-2-or-later).
 - **The IQ needs no conversion whatsoever.** `cu8` on nrsc5's stdin is byte
   for byte what the reader thread already puts in the ring buffer, so `feed`
   passes the block straight through.
@@ -392,6 +409,183 @@ see the note at the end. Full reasoning in **Amendment 11** of docs/PLAN.md.
   surface-versus-airborne CPR fault was invisible to every synthetic test.
   The check is one line: tune to a busy channel in 929–932 MHz and watch
   the panel.
+
+## Monitor and voice-detection facts
+
+Measured on this machine on 2026-08-30, against synthetic air and synthetic
+audio. Same rule as the other fact sections: don't re-derive them. The
+feature ships and is **not yet run against a real band** - see the note at
+the end.
+
+- **A power spectrum cannot tell a conversation from a pager, and no amount
+  of sweeping will fix that.** They occupy the same width, in the same
+  allocation, with the same steadiness. This is the same wall the classifier
+  already hit with flatness and analog FM. So voice detection does not look
+  at the spectrum at all: the monitor parks on a busy channel, demodulates
+  it with the mode the classifier already chose, and `scan/voice.py` reads
+  the *audio*. Using a different mode here than Listen would offer would
+  mean judging a channel through a receiver the app never gives anybody.
+- **Speech is the only thing on the air that both pauses and has a pitch.**
+  Its loudness swings 9-13 dB against under 2.5 dB for music, data, a tone
+  and static, and 35-96% of that movement falls in the 2-8 Hz syllable band.
+  The depth alone is what separates it; the rhythm is the confirmation.
+- **A random bit stream finds a strong pitch in most of its frames.** Its
+  voiced fraction measures 0.24-0.64, which reads exactly like speech, and
+  this is the measurement that looks like it works and does not. What a bit
+  stream cannot do is find the *same* pitch twice: the spread of the middle
+  half of its readings is **114-142 Hz**, against 4-18 Hz for speech and
+  0-13 Hz for music. `PITCH_WANDER_HZ` is the threshold that separates a
+  pager from a person, and it is the only one that does.
+- **Spectral flatness has to be measured across the band the audio actually
+  occupies.** Everything reaching the detector has been through an audio
+  filter that stops at 4 kHz (NFM) or 15 kHz (WFM), and the empty bins above
+  it drive a geometric mean to zero for static and speech alike - the
+  feature reads as working and measures nothing. Over its own 99% bandwidth:
+  static **0.87-0.97**, a bit stream **0.13-0.25**, speech and music
+  **0.01-0.07**, a tone **0.000**.
+- **Music is separated by what it does not do.** It is pitched in 99% of its
+  frames where speech manages 35-60% - speech can only be pitched between
+  the pauses that make it speech - and it does not swing. Reaching further
+  up the audio range sounded like the obvious discriminator and is not: the
+  95th percentile of a harmonically rich chord sits at **1.5-1.7 kHz**,
+  lower than speech's, because the energy is all in the low harmonics.
+- **The verdict must be taken before the audio chain and the audio played
+  after it.** The AGC's entire job is to flatten the loudness swings that
+  are the strongest evidence for speech, so a verdict read off what reaches
+  the sound card reports the gain rider's settings rather than what is on
+  the air.
+- **A short clip is answered and never called certain.** Under 0.35 s the
+  2-8 Hz envelope band does not exist to be measured and the answer is
+  refused outright; under 0.6 s it is given with confidence capped below the
+  trust threshold. Same rule as the calibration assistant refusing a
+  wandering reference.
+- **An unmodulated carrier at 30 dB SNR demodulates to -36 dBFS of
+  discriminator noise, not to silence.** So "Silent" is reached only by a
+  genuinely quiet channel, and a dead carrier reads as "Static" - which is
+  what it sounds like, and is why the classifier's own shape-based
+  "Unmodulated carrier" is still the better answer for that case.
+- **Listening outranks the sweep, and the sweep has to be able to lose.** A
+  50 ms dwell landing between two words measures a bare carrier and says so,
+  which is a fair reading of what it measured. Having then heard somebody
+  talking on that channel, "Unmodulated carrier" sitting at the top of a
+  card over a badge reading Voice is the app contradicting itself on one
+  line. `_rank` demotes a bare-carrier reading once listening has disproved
+  it, and `Activity.label` falls back to the band plan's name for the
+  allocation until a later pass names it properly. Seen immediately on the
+  first synthetic run; it is not a corner case.
+- **The ledger *is* the persistence gate, and it is a better one.** Each
+  monitor pass is a `Sweeper` with `passes=1`, and how many passes a channel
+  has been heard in decides both that it is real and what the user came to
+  the screen to see. The sweep's own three-pass gate exists so a list does
+  not reshuffle after five seconds, which is not a problem a screen that
+  runs for an hour has.
+- **Duty is measured from when a channel was first heard, not from the start
+  of the session.** A channel found in the twentieth pass and up in every
+  pass since is busy; dividing by the whole session reports it at a few
+  percent and takes an hour to correct itself.
+- **A revisit delay is what stops a scanner locking onto one frequency.**
+  Without it the strongest channel in the band is auditioned every cycle and
+  nothing else ever is - and the failure is silent, because the list keeps
+  updating from the sweep and looks entirely correct. 8 seconds normally,
+  3 where a voice was heard last time, because a conversation is short
+  transmissions with gaps and the gaps are longer than that.
+- **A hold is released on a timer, never on the first quiet window.** The
+  gaps between two overs are silence on the same frequency; leaving on the
+  first one sends the radio away mid-exchange and brings it back after the
+  reply. 3 seconds. A hold the *user* asked for is never released, because
+  they can hear things the classifier cannot.
+- **Only voice and music stop the sweep.** Knowing a channel carries data is
+  worth having and listening to it is not, so `Verdict.carries_audio` is one
+  place rather than a condition repeated in the engine and the ledger.
+- **The tuner is parked `TUNE_OFFSET_HZ` off the channel and the block
+  shifted back in software**, the same 37 kHz the sweep uses and for a
+  stronger reason: a sweep only has to measure through the RTL2832U's DC
+  notch, and this has to listen through it. The shift keeps its phase across
+  blocks, so a hold lasting a minute has no seam in it. A sign error here
+  parks the receiver two offsets away and every channel in the band comes
+  back as static, which looks exactly like a quiet band -
+  `test_the_channel_still_demodulates_from_off_centre` is the only thing
+  that says otherwise.
+- **Cost:** the verdict is **3.6 ms** per 0.8 s clip (0.45% of a core, and
+  only while auditioning). The shifter is the real expense: at 2.4 MS/s
+  shift plus NFM demodulation is **114 ms per second of radio** against the
+  demodulator's 61 alone, so the shift costs 52 ms/s (5.2% of a core); at
+  240 kS/s it is 4 ms/s. Only paid while parked on a channel.
+- **Cycle times, sweep pass plus one audition:** FM broadcast 12 steps,
+  **1.45 s**; 2 m amateur and the walkie-talkie band 3 steps, **0.96 s**; AM
+  broadcast at 240 kS/s 9 steps, **1.31 s**. So a channel that is up gets
+  noticed within about two cycles and listened to within three.
+- **Not yet heard off air.** Fifty-two tests cover the ledger, the release
+  and revisit timers, hold and skip, and the whole engine loop against a
+  synthetic 2 m band through the real `Sweeper`, the real demodulator and
+  the real `Engine` - and none of that is a real band. POCSAG was in exactly
+  this position on 2026-08-29 and ADS-B's surface-versus-airborne CPR fault
+  was invisible to every synthetic test. The check is: Monitor the
+  walkie-talkie band or Marine VHF for ten minutes and see whether the
+  channels it stops on are the ones somebody is actually talking on.
+
+## Whole-dial and multi-range facts
+
+Measured on this machine on 2026-08-30, building the Expert range picker.
+Same rule as the other fact sections: don't re-derive them. The feature
+ships and has **not yet been swept against a real band** - see the note at
+the end.
+
+- **The band plan already tiles the whole tunable dial, with no holes and
+  no overlaps between a band and an allocation.** Checked programmatically
+  from 500 kHz to 1.766 GHz: 21 bands and 42 allocations, and the only
+  nesting anywhere is Remote Controls inside 70 cm Amateur. So `coverage`
+  is a join rather than a construction, and the "Unallocated" filler it can
+  emit is currently unreachable in the US plan - which is exactly why it
+  exists, because a list that claims to be the whole spectrum and silently
+  omits 700 MHz of it gives the reader no way to notice.
+- **63 stretches, and the whole dial is 991 steps.** At the measured 0.15 s
+  a step that is about two and a half minutes *per pass*, and a scan is
+  three passes. A progress bar that crawls for two minutes is
+  indistinguishable from a hang, so the picker states the step count and
+  the time before the button is pressed rather than after.
+- **One window for a multi-band selection is wrong whichever one is
+  chosen.** 2.4 MHz at 530 kHz puts the V4's upconverter leak inside the
+  window at 65 dB above the noise; 240 kHz across FM broadcast is narrower
+  than one station, which is 141 steps and every width and shape measured
+  wrong. So the rate travels with the range - `SweepRange` - and the engine
+  changes it at each boundary, in frequency order, which keeps it to one
+  change per boundary per pass.
+- **Merging ranges can move a lower edge into territory where the window
+  has to narrow, and grouping on the *stated* preference does not see
+  it.** How wide a window may be depends on how close its bottom comes to
+  0 Hz, so two stretches that both state no preference can still be given
+  different windows. Grouping on `safe_sample_rate`'s answer instead is
+  safe by construction: the answer only ever narrows going down the dial,
+  so every member of a group shares the edge the group is planned from.
+  Not reachable in the US plan today - the one place it would bite,
+  500-530 kHz against the AM band, is already separated by AM's own
+  preference - which is precisely why it is worth a test rather than a
+  comment.
+- **A gain probe per range per pass would cost more than the sweep.** A
+  probe is 340 ms of dead air, and three passes over sixty ranges is
+  minutes of it. Measured once per range and cached for the session;
+  every later crossing is a single register write. Setting a gain and
+  measuring one are not the same operation and only one of them is
+  expensive.
+- **`Reader.set_gain` takes decibels and `Engine.gain` is a
+  `GainChoice`.** Passing the measurement where the number belongs raises
+  nothing until it reaches the device, which on the reader thread is
+  where there is no user to show it to. Found by a test with a fake reader
+  that actually implements the method, not by reading the code.
+- **A channel is auditioned through the window of the range it belongs
+  to, not the one the sweep stopped on.** A session watching the AM band
+  alongside anything else parks on an AM station having just swept
+  145 MHz, and demodulating it through the 2.4 MHz window that was right
+  for 145 MHz is the upconverter leak drowning it - the fault
+  `safe_sample_rate` exists for, arriving by a new route.
+- **Not yet swept against a real band.** The tests cover the coverage
+  list, the merge, the multi-range sweeper against synthetic air through a
+  source that answers a change of window, the engine's per-range window
+  and gain, and a two-range monitor session that finds a talker and holds
+  it - and none of that is a real aerial. The check is: at Expert, tick
+  AM Radio and FM Radio together and scan. Both lists should be as good as
+  scanning each alone, which is the whole claim.
 
 ## HF and sample-rate facts
 
@@ -1071,10 +1265,22 @@ bettersdr/
     bandplan/     us.yaml + loader; feeds the ribbon, the classifier and the
                   Discover band chips (`scan: true`). Also the named channels
                   inside a band - "Channel 16", "WX1" - and a second list
-                  saying what the space between the bands is licensed for
+                  saying what the space between the bands is licensed for.
+                  `coverage` joins the two into the whole tunable dial as a
+                  list of `Segment`s with no holes in it, and `sweep_ranges`
+                  turns a selection of them back into ranges to sweep
     detector.py   shaped noise floor, thresholding, grouping, persistence gate
     classifier.py band plan + shape features -> a labelled, explained Signal
-    sweeper.py    step planning, the scan state machine, stitching
+    sweeper.py    step planning, the scan state machine, stitching. A
+                  sweep is a list of `SweepRange`s, each with its own window,
+                  because a selection spanning AM and FM cannot share one
+    voice.py      what a demodulated channel sounded like: voice, music, a
+                  tone, data or static, and why. Audio in, a verdict out; no
+                  Qt, no device, no spectrum
+    monitor.py    the activity ledger and the scanner state machine - how
+                  often each channel has been up, where the radio goes next,
+                  and when to stop on a channel and when to let it go. Pure
+                  logic against an injectable clock
   decode/
     rds.py        the 57 kHz subcarrier: BPSK, block sync, station name,
                   radio text, PI code and the US callsign it encodes
@@ -1109,6 +1315,10 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
     freq_manager.py  the bookmark window
     widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
                   colormaps.py, axes.py, signalcard.py, aircraftcard.py,
+                  activitycard.py (one watched channel: how busy, what it
+                  sounded like, Hold and Skip - updated rather than rebuilt,
+                  because its numbers change five times a second and its
+                  buttons must not move),
                   planemap.py, pagerlog.py, icons.py,
                   panel.py (the sectioned, level-gated control column),
                   help.py (a control's own name as the way in to what it
@@ -1116,7 +1326,10 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
                   rows that carry their own text),
                   viewspan.py (how much of the captured window is on screen:
                   the zoom and pan arithmetic, and the wheel, drag and click
-                  the spectrum and the waterfall share)
+                  the spectrum and the waterfall share),
+                  rangepicker.py (the whole dial as tick boxes, at Expert:
+                  what each stretch is labelled, what window it will really
+                  be swept through, and how long the sweep will take)
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
 tools/
   build_basemap.py  compiles ui/basemap/us.bsm from Natural Earth and the
@@ -1125,6 +1338,9 @@ tools/
 tests/
   synth.py        synthetic IQ generator — most tests need no hardware
   synth_adsb.py   Mode S bursts; synth_pocsag.py  pager transmissions
+  synth_audio.py  what a demodulator hands over: speech with a syllable
+                  rhythm and a wandering pitch, sustained music, a tone, an
+                  FSK bit stream, static and a dead carrier
 ```
 
 ### Threading model
@@ -1275,6 +1491,36 @@ Device control calls are serialised through a command queue consumed by the read
   and step plans get written against the default rate and quietly break when
   the window narrows. Express them as a duration or a fraction of the rate,
   and check the answer at 240 kS/s as well as at 2.4 MS/s.
+- **A sweep and a watch answer different questions, and the screen says
+  which.** Scan asks "what is transmitting right now", which is right for
+  broadcast bands and close to useless for the bands people want a scanner
+  for - a channel silent fifty-nine minutes an hour honestly reports as
+  nothing, and the report is wrong about the band. Monitor keeps sweeping
+  and counts. Their orderings are not the same either, so the Order control
+  offers different lists in the two modes rather than one list where half
+  the entries silently fall back to another - the same rule as "nothing may
+  look clickable and then do nothing".
+- **A classification the app has since disproved must not stay on the
+  card.** The monitor is the first thing in the app that acquires better
+  evidence about a signal than the classifier had, and the first version put
+  the two claims side by side: "Unmodulated carrier" over a badge reading
+  Voice. Where a later, more direct measurement contradicts an earlier
+  inference, the inference loses - and says so - rather than both being
+  displayed and left to the reader.
+- **The band chips are the beginner's list; Expert gets the whole dial.**
+  A short list of busy, legal, interesting bands is the right way in and the
+  wrong ceiling - "beginner-friendly must not mean capability-capped" applies
+  to *where you may point the receiver* as much as to which controls appear.
+  So at Expert `bandplan.coverage` replaces the chips with every stretch of
+  spectrum between 500 kHz and 1.766 GHz, labelled by its own span because
+  two of them are both called "Federal government". They replace the chips
+  rather than joining them: two selections on one screen with no way to tell
+  which one Scan is about to use is worse than either alone.
+- **A selection of ranges is what the user asked for; a sweep plan is not the
+  same thing.** `bandplan.sweep_ranges` is the step between them. Touching
+  stretches are merged, because stepping them separately covers the boundary
+  twice; stretches that will be given *different windows* are never merged,
+  because one window for both is wrong about one of them.
 - **Gain belongs to the band, not to the session.** How loud a band is has
   nothing to do with how loud the last one was, and the difference measures
   30 dB between FM broadcast and AM. Any moment the front end is pointed at

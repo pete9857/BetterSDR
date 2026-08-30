@@ -233,6 +233,18 @@ def test_the_listening_screen_explains_the_controls_that_need_it_most():
     assert {"rf-gain", "squelch", "bandwidth", "sample-rate"} <= named
 
 
-def test_the_discover_screen_explains_its_own_two():
+def test_the_discover_screen_explains_the_controls_that_need_it_most():
+    """Two settings and two whole ideas.
+
+    Monitor and voice detection are not settings with a right value; they are
+    mental models - "keep sweeping and stop on anything that talks", "listen
+    to a channel to hear whether that is a person or a pager" - and a beginner
+    who has not met either has nowhere else to find out what they do.
+    """
     named = _topics_named_in(UI_DIR / "discover_view.py")
-    assert {"sensitivity", "sort-order"} <= named
+    assert {
+        "sensitivity",
+        "sort-order",
+        "monitor-mode",
+        "voice-detection",
+    } <= named

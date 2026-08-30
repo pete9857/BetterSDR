@@ -1244,3 +1244,167 @@ def test_aircraft_tracking_takes_the_window_back_too(hd):
     engine._end_adsb()
     _drain(engine)
     assert engine._hd is not None
+
+
+# -- sweeping several stretches of dial at once -------------------------------
+#
+# The Expert discovery screen lets several ranges be selected together. The
+# two things a sweep of one band set up once - the window and the gain - now
+# have to be set up per range, because those are precisely the two this app
+# has measured to belong to the band rather than to the session.
+
+
+class LoudBandDevice(FakeGainDevice):
+    """A device where one band is loud and the other is quiet.
+
+    Which is the whole point of measuring per range: 1090 MHz asks for
+    49.6 dB where the FM band takes 20-33 on the same aerial, so a probe on
+    one is not an answer for the other.
+    """
+
+    def __init__(self, loud_from: float = 88e6, loud_to: float = 108e6) -> None:
+        super().__init__()
+        self.loud = (loud_from, loud_to)
+        self.gain_db = 0.0
+
+    def read(self, n: int) -> np.ndarray:
+        loud = self.loud[0] <= self.center_freq <= self.loud[1]
+        # Level rises with gain, so stepping down from maximum reaches the
+        # target sooner on the loud band than on the quiet one.
+        swing = (127 if loud else 8) * (self.gain_db / max(self.gains_db))
+        phase = np.arange(n) * (np.pi / 2)
+        return np.clip(128 + swing * np.sin(phase), 0, 255).astype(np.uint8)
+
+
+class FakeGainReader(FakeScanReader):
+    """A reader that runs a submitted command against a fake device."""
+
+    def __init__(self, device=None) -> None:
+        super().__init__()
+        self.device = device if device is not None else LoudBandDevice()
+        self.gains: list[object] = []
+
+    def submit(self, command) -> None:
+        super().submit(command)
+        command(self.device)
+
+    def set_gain(self, db) -> None:
+        self.gains.append(db)
+
+
+AM = (530e3, 1.7e6, 240_000)
+FM = (88e6, 108e6, None)
+
+
+def test_a_scan_can_cover_several_ranges_at_once():
+    engine = Engine()
+    engine.reader = FakeScanReader()
+
+    engine.start_scan(ranges=[AM, FM])
+    assert _scan_steps(engine) == 9 + 12
+
+
+def test_each_range_keeps_its_own_window():
+    """One rate for a selection spanning AM and FM is wrong about one of them
+    whichever way it goes: 2.4 MHz at 530 kHz is the upconverter's own
+    oscillator leak, and 240 kHz across FM is narrower than one station."""
+    engine = Engine()
+    planned = engine.plan_ranges([AM, FM])
+    assert [span.sample_rate for span in planned] == [240_000.0, 2_400_000.0]
+
+
+def test_crossing_a_range_boundary_changes_the_window():
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_scan(ranges=[AM, FM])
+    _drain(engine)
+    sweeper = engine._sweeper
+    assert sweeper is not None
+    assert engine.sample_rate == 240_000
+
+    while sweeper.current_rate == 240_000:
+        sweeper._step_index += 1
+    engine._prepare_sweep_step(sweeper, park_audio=True)
+    assert engine.sample_rate == 2_400_000
+    assert engine.reader.sample_rates[-1] == 2_400_000
+
+
+def test_nothing_happens_in_the_middle_of_a_range():
+    """A single-band sweep must cost exactly what it always did."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_scan(88e6, 108e6)
+    _drain(engine)
+    sweeper = engine._sweeper
+    assert sweeper is not None
+    before = len(engine.reader.commands)
+    for _ in range(len(sweeper.steps)):
+        engine._prepare_sweep_step(sweeper, park_audio=True)
+        sweeper._step_index += 1
+    assert len(engine.reader.commands) == before
+
+
+def test_the_gain_is_measured_once_per_range_and_then_reused():
+    """A probe is 340 ms of dead air. Three passes over sixty ranges would be
+    minutes of it; setting a gain already measured is one register write."""
+    engine = Engine()
+    engine.reader = FakeGainReader()
+    engine.start_scan(ranges=[AM, FM], passes=3)
+    _drain(engine)
+    sweeper = engine._sweeper
+    assert sweeper is not None
+
+    # One probe has already run, for the range the sweep starts on.
+    assert len(engine.reader.commands) == 1
+    for _ in range(3):
+        for index in range(len(sweeper.steps)):
+            sweeper._step_index = index
+            engine._prepare_sweep_step(sweeper, park_audio=True)
+    assert len(engine.reader.commands) == 2
+    assert sorted(engine._sweep_gains) == [0, 1]
+    # The two ranges genuinely wanted different gains, which is why measuring
+    # once for the whole sweep would have been wrong...
+    assert engine._sweep_gains[0] != engine._sweep_gains[1]
+    # ...and every later crossing sets the measured one instead of measuring
+    # again. Five crossings after the first two: three passes, two boundaries
+    # each, minus the pass that ends on the second range.
+    assert len(engine.reader.gains) == 4
+
+
+def test_a_watched_channel_is_auditioned_through_its_own_range_window():
+    """An AM station auditioned through a 2.4 MHz window is the oscillator
+    leak drowning it - the fault `safe_sample_rate` exists for. Which window
+    the sweep happened to stop on is not the right answer."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_monitor(ranges=[AM, FM], band_name="2 ranges")
+    _drain(engine)
+    assert engine._range_containing(1_000_000) == 0
+    assert engine._range_containing(94_900_000) == 1
+    assert engine._range_containing(500_000_000) is None
+
+    engine.sample_rate = 2_400_000
+    engine._sweep_range_index = 1
+    engine._use_sweep_range(0, engine._monitor_ranges[0].sample_rate, 1_037_000, False)
+    assert engine.sample_rate == 240_000
+
+
+def test_a_monitor_of_several_ranges_sweeps_all_of_them():
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_monitor(ranges=[AM, FM])
+    _drain(engine)
+    sweeper = engine._monitor_sweeper
+    assert sweeper is not None
+    assert len(sweeper.steps) == 9 + 12
+    assert sweeper.passes == 1
+
+
+def test_an_empty_selection_starts_nothing():
+    """Nothing selected is a real state, not a sweep of zero hertz."""
+    engine = Engine()
+    engine.reader = FakeScanReader()
+    engine.start_scan(ranges=[])
+    assert not engine.scanning
+    engine.start_monitor(ranges=[])
+    assert not engine.monitoring

@@ -15,7 +15,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,17 +59,27 @@ from ..decode.pocsag import (
 from ..decode.rds import MIN_IF_RATE_HZ, RdsReceiver, RdsState
 from ..dsp import convert, demod
 from ..dsp.chain import AudioChain, FrontEnd
+from ..dsp.correct import FrequencyShifter
 from ..dsp.denoise import SpectralNoiseReduction
 from ..dsp.filters import DEFAULT_TAPS_PER_PHASE, Deemphasis
 from ..dsp.psd import DEFAULT_FFT_SIZE, WINDOWS, Spectrum
 from ..dsp.stereo import MIN_MPX_RATE_HZ, StereoDecoder
+from ..scan import voice
 from ..scan.classifier import Signal
 from ..scan.detector import DEFAULT_THRESHOLD_DB
+from ..scan.monitor import (
+    DEFAULT_AUDITION_S,
+    HOLDING,
+    Monitor,
+    MonitorState,
+)
 from ..scan.sweeper import (
     DEFAULT_PASSES,
     DEFAULT_SETTLE_S,
+    TUNE_OFFSET_HZ,
     Sweeper,
     SweepProgress,
+    SweepRange,
     SweepResult,
 )
 from .device import DEFAULT_SAMPLE_RATE, Device
@@ -399,6 +409,7 @@ class Engine:
         self._mailbox: Mailbox[DisplayFrame] = Mailbox()
         self._scan_mailbox: Mailbox[ScanUpdate] = Mailbox()
         self._adsb_mailbox: Mailbox[AdsbState] = Mailbox()
+        self._monitor_mailbox: Mailbox[MonitorState] = Mailbox()
         self._commands: queue.Queue[Callable[[], None]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -410,6 +421,14 @@ class Engine:
         self._scan_source: _ReaderSource | None = None
         self._resume_hz: int | None = None
         self._resume_rate: int | None = None
+        # A sweep may cover several stretches of dial at once, and each has
+        # its own window width and its own gain - which are the two things
+        # this app has measured to be per-band rather than per-session. Which
+        # stretch the tuner is currently set up for, and what each of them
+        # measured, so a three-pass sweep pays for the probe once per stretch
+        # rather than once per pass.
+        self._sweep_range_index: int | None = None
+        self._sweep_gains: dict[int, GainChoice | None] = {}
         # Set the instant a scan is asked for, cleared when the sweep ends.
         # See `scanning` for why this is not just "is there a sweeper".
         self._scan_wanted = threading.Event()
@@ -423,6 +442,37 @@ class Engine:
         self._adsb_center_hz: int | None = None
         self._adsb_resume_rate: int | None = None
         self._adsb_published = 0.0
+
+        # Monitoring: a sweep that never ends, with short excursions onto
+        # whatever it finds busy. Shaped like the scan it is built out of -
+        # it borrows the window, the tuner and the gain and gives all three
+        # back - with one difference that changes the parking rule: it plays
+        # audio while it is holding a channel. See `_monitor_step`.
+        self._monitor: Monitor | None = None
+        self._monitor_sweeper: Sweeper | None = None
+        self._monitor_source: _ReaderSource | None = None
+        self._monitor_wanted = threading.Event()
+        # The listening screen's `center_hz` must not move for an excursion,
+        # the same rule the sweep and the aircraft screen follow, so where the
+        # tuner actually is lives here.
+        self._monitor_center_hz: int | None = None
+        # The window the session runs through, and the one to put back after.
+        self._monitor_rate: int | None = None
+        self._monitor_ranges: tuple[SweepRange, ...] = ()
+        self._monitor_resume_rate: int | None = None
+        self._monitor_threshold_db = DEFAULT_THRESHOLD_DB
+        # The demodulator built for whatever channel is being listened to,
+        # cached against what it was built for: a hold is thousands of blocks
+        # through one filter, and rebuilding it per block would be the only
+        # expensive thing in the loop.
+        self._audition: demod.Demodulator | None = None
+        self._audition_key: tuple[str, float, int] | None = None
+        self._audition_shift: FrequencyShifter | None = None
+        self._audition_audio: list[np.ndarray] = []
+        self._audition_frames = 0
+        # True while a held channel's audio is going to the sound card, which
+        # is the one thing that unparks the sink during a monitor session.
+        self._monitor_playing = False
         # Set while a gain measurement is queued on the reader thread, so two
         # callers asking at once produce one probe rather than two.
         self._gain_pending = threading.Event()
@@ -932,43 +982,79 @@ class Engine:
         """The latest news from a scan, or the finished result. Never blocks."""
         return self._scan_mailbox.peek()
 
+    def plan_ranges(
+        self, wanted: Sequence[tuple[float, float, int | None]]
+    ) -> tuple[SweepRange, ...]:
+        """Turn stretches of dial into stretches with a window each.
+
+        The window belongs to the band being swept, not to whatever the
+        receiver happens to be listening through. This used to fall back to
+        `self.sample_rate`, and listening to an AM station leaves that at
+        240 kHz: a sweep of FM broadcast started afterwards planned 141
+        steps instead of 12, through a window narrower than one FM station,
+        so every width and shape it measured was wrong as well as slow.
+        A band that wants something narrower says so in `sample_rate_hz`.
+
+        The bottom of each range is where the window is most likely to reach
+        below 0 Hz, so that is what the guard is asked about. Sweeping the
+        AM band at 2.4 MHz would otherwise report the upconverter's own
+        oscillator as the strongest station in Seattle - and a selection that
+        covers both AM and FM has to answer that question once per range,
+        because one answer for both is wrong about one of them whichever way
+        it goes.
+        """
+        return tuple(
+            SweepRange(
+                float(low_hz),
+                float(high_hz),
+                float(
+                    safe_sample_rate(
+                        low_hz, preferred_hz=int(rate or DEFAULT_SAMPLE_RATE)
+                    )
+                ),
+            )
+            for low_hz, high_hz, rate in wanted
+            if high_hz > low_hz
+        )
+
     def start_scan(
         self,
-        low_hz: float,
-        high_hz: float,
+        low_hz: float = 0.0,
+        high_hz: float = 0.0,
         threshold_db: float = DEFAULT_THRESHOLD_DB,
         passes: int = DEFAULT_PASSES,
         sample_rate_hz: int | None = None,
+        ranges: Sequence[tuple[float, float, int | None]] | None = None,
     ) -> None:
-        """Sweep a range and report what is in it.
+        """Sweep one or more ranges and report what is in them.
 
         Audio stops for the duration - the radio is somewhere else entirely
         for most of it - and resumes on the frequency it was tuned to before.
+
+        `ranges` is `(low, high, preferred window)` per stretch of dial and
+        supersedes `low_hz`/`high_hz` when given. They are swept in frequency
+        order, each through the window it asked for.
         """
-        if self.reader is None or self.scanning or self.receiving_adsb:
+        if (
+            self.reader is None
+            or self.scanning
+            or self.receiving_adsb
+            or self.monitoring
+        ):
             return
-        # The window belongs to the band being swept, not to whatever the
-        # receiver happens to be listening through. This used to fall back to
-        # `self.sample_rate`, and listening to an AM station leaves that at
-        # 240 kHz: a sweep of FM broadcast started afterwards planned 141
-        # steps instead of 12, through a window narrower than one FM station,
-        # so every width and shape it measured was wrong as well as slow.
-        # A band that wants something narrower says so in `sample_rate_hz`.
-        #
-        # The bottom of the range is where the window is most likely to reach
-        # below 0 Hz, so that is what the guard is asked about. Sweeping the
-        # AM band at 2.4 MHz would otherwise report the upconverter's own
-        # oscillator as the strongest station in Seattle.
-        rate = safe_sample_rate(
-            low_hz, preferred_hz=int(sample_rate_hz or DEFAULT_SAMPLE_RATE)
+        planned = self.plan_ranges(
+            list(ranges) if ranges else [(low_hz, high_hz, sample_rate_hz)]
         )
+        if not planned:
+            return
         sweeper = Sweeper(
-            low_hz,
-            high_hz,
-            float(rate),
+            planned[0].low_hz,
+            planned[0].high_hz,
+            planned[0].sample_rate,
             fft_size=self._spectrum.fft_size,
             threshold_db=threshold_db,
             passes=passes,
+            ranges=planned,
         )
         self._scan_wanted.set()
         self._scan_mailbox.put(ScanUpdate(progress=sweeper.progress, signals=()))
@@ -977,6 +1063,95 @@ class Engine:
     def stop_scan(self) -> None:
         """Abandon a scan and go back to listening."""
         self._commands.put(self._end_scan)
+
+    # -- monitoring --------------------------------------------------------
+
+    @property
+    def monitoring(self) -> bool:
+        """Whether a monitor session is wanted, not whether it has started.
+
+        Same reasoning as `scanning` and `receiving_adsb`, and the same fault
+        without it: a view polling at 20 Hz sees "not monitoring" in the gap
+        between the request and the DSP thread acting on it, and concludes
+        the session already ended.
+        """
+        return self._monitor_wanted.is_set()
+
+    def monitor_update(self) -> MonitorState | None:
+        """The ledger as it stands, or None before the first pass completes."""
+        return self._monitor_mailbox.peek()
+
+    def start_monitor(
+        self,
+        low_hz: float = 0.0,
+        high_hz: float = 0.0,
+        band_name: str = "",
+        threshold_db: float = DEFAULT_THRESHOLD_DB,
+        sample_rate_hz: int | None = None,
+        listen: bool = True,
+        audition_s: float = DEFAULT_AUDITION_S,
+        ranges: Sequence[tuple[float, float, int | None]] | None = None,
+    ) -> None:
+        """Watch a range indefinitely, stopping on anything that talks.
+
+        The radio is on loan for the whole session, exactly as it is for a
+        sweep - the frequency being listened to is remembered and restored,
+        and `center_hz` never moves, so a view arriving mid-session still
+        reads the dial the user believes they are on.
+
+        The one way this differs from every other excursion in the app: audio
+        plays while a channel is being held. That is the feature, so `_run`'s
+        parking rule asks the monitor rather than assuming silence.
+        """
+        if (
+            self.reader is None
+            or self.scanning
+            or self.receiving_adsb
+            or self.monitoring
+        ):
+            return
+        # The window belongs to the band being watched, never to whatever the
+        # receiver was listening through - the same leak `start_scan`
+        # documents, and it would be worse here because the wrong window
+        # persists for the whole session rather than for five seconds.
+        planned = self.plan_ranges(
+            list(ranges) if ranges else [(low_hz, high_hz, sample_rate_hz)]
+        )
+        if not planned:
+            return
+        monitor = Monitor(
+            min(span.low_hz for span in planned),
+            max(span.high_hz for span in planned),
+            band_name=band_name,
+            audition_s=audition_s,
+            listen=listen,
+        )
+        self._monitor_threshold_db = float(threshold_db)
+        self._monitor_ranges = planned
+        self._monitor_rate = int(planned[0].sample_rate)
+        self._monitor_wanted.set()
+        self._monitor_mailbox.put(monitor.snapshot())
+        self._commands.put(lambda: self._begin_monitor(monitor))
+
+    def stop_monitor(self) -> None:
+        """Give the radio back and go on listening to whatever it was on."""
+        self._commands.put(self._end_monitor)
+
+    def monitor_skip(self, frequency_hz: float) -> None:
+        """Leave this channel now and stop going back to it."""
+        self._commands.put(lambda: self._monitor_command("skip", frequency_hz))
+
+    def monitor_hold(self, frequency_hz: float) -> None:
+        """Stay on this channel until told otherwise."""
+        self._commands.put(lambda: self._monitor_command("hold", frequency_hz))
+
+    def monitor_release(self, frequency_hz: float = 0.0) -> None:
+        """Undo a hold and let the sweep resume when the channel goes quiet."""
+        self._commands.put(lambda: self._monitor_command("release", frequency_hz))
+
+    def monitor_resume(self, frequency_hz: float) -> None:
+        """Undo a skip, so the channel is offered again."""
+        self._commands.put(lambda: self._monitor_command("unskip", frequency_hz))
 
     # -- aircraft ----------------------------------------------------------
 
@@ -1004,7 +1179,12 @@ class Engine:
         comes back afterwards. There is nothing to listen to at 1090 MHz; the
         signal is a 1 Mbit/s data burst and the audio path would only hiss.
         """
-        if self.reader is None or self.scanning or self.receiving_adsb:
+        if (
+            self.reader is None
+            or self.scanning
+            or self.receiving_adsb
+            or self.monitoring
+        ):
             return
         # Emptied here rather than when the receiver is built, so a view
         # polling every 200 ms cannot repopulate itself from the last
@@ -1030,20 +1210,75 @@ class Engine:
         self._resume_hz = self.center_hz
         self._resume_rate = self.sample_rate
         self._sweeper = sweeper
-        if int(sweeper.sample_rate) != self.sample_rate:
-            self.sample_rate = int(sweeper.sample_rate)
-            if self.reader is not None:
-                self.reader.set_sample_rate(self.sample_rate)
-            self._apply_sample_rate(self.sample_rate)
+        self._sweep_range_index = None
+        self._sweep_gains = {}
         self._scan_source = _ReaderSource(self.reader)
         if self.sink is not None:
             # Rather than let it starve for the length of the sweep: an
             # underrun count is how the audio path reports a real fault, and
             # filling it with expected ones would make it useless.
             self.sink.stop()
-        self._probe_scan_gain(sweeper)
+        # The window and the gain for the first range, which is the same work
+        # every later range needs when the sweep reaches it.
+        self._prepare_sweep_step(sweeper, park_audio=True)
 
-    def _probe_scan_gain(self, sweeper: Sweeper) -> None:
+    def _prepare_sweep_step(self, sweeper: Sweeper, park_audio: bool) -> None:
+        """Set the front end up for the stretch of dial about to be measured.
+
+        A sweep of one band did this once, in `_begin_scan`. A sweep of
+        several has to do it at every boundary, because the two things it
+        sets are exactly the two this app has measured to belong to the band
+        rather than to the session: the window - 240 kHz on the AM band
+        against 2.4 MHz on FM - and the gain, which is 30 dB apart between
+        them on the same aerial.
+
+        Nothing at all happens in the middle of a range, which is every step
+        but a handful, so a single-band sweep costs one comparison per step
+        and behaves exactly as it did before.
+
+        `park_audio` is what separates the two callers. A sweep has stopped
+        the sink for its whole duration and `_apply_sample_rate` would start
+        it again mid-sweep; a monitor session legitimately plays sound and
+        lets `_run`'s parking rule decide, which is what the flag
+        `_apply_sample_rate` clears is for.
+        """
+        self._use_sweep_range(
+            sweeper.current_range_index,
+            sweeper.current_rate,
+            sweeper.current_hz,
+            park_audio=park_audio,
+        )
+
+    def _use_sweep_range(
+        self, index: int, rate_hz: float, probe_hz: int, park_audio: bool
+    ) -> None:
+        """Put the window and the gain where one stretch of dial wants them."""
+        reader = self.reader
+        if reader is None or index == self._sweep_range_index:
+            return
+        self._sweep_range_index = index
+        rate = int(rate_hz)
+        if rate != self.sample_rate:
+            self.sample_rate = rate
+            reader.set_sample_rate(rate)
+            self._apply_sample_rate(rate)
+            if park_audio and self.sink is not None:
+                self.sink.stop()
+        if index in self._sweep_gains:
+            # Measured on an earlier pass over this same stretch. Setting a
+            # gain is one register write; measuring one is 340 ms of dead
+            # air, and paying that three times per range per scan would turn
+            # a sixty-range sweep into minutes of probing.
+            gain = self._sweep_gains[index]
+            if gain is not None and gain != self.gain:
+                self.gain = gain
+                # The decibels, not the measurement. `Reader.set_gain` takes
+                # a number or None for the tuner's own AGC.
+                reader.set_gain(gain.gain_db)
+            return
+        self._probe_scan_gain(probe_hz, index)
+
+    def _probe_scan_gain(self, probe_hz: int, index: int = 0) -> None:
         """Measure the gain for the band about to be swept.
 
         Gain belongs to the band, and a sweep points the front end somewhere
@@ -1069,7 +1304,7 @@ class Engine:
         reader = self.reader
         if reader is None:
             return
-        first = safe_center_hz(sweeper.current_hz)
+        first = safe_center_hz(probe_hz)
         self._probe_started()
 
         def command(device: Device) -> None:
@@ -1077,6 +1312,7 @@ class Engine:
                 device.center_freq = first
                 device.reset_buffer()
                 self.gain = choose_gain(device)
+                self._sweep_gains[index] = self.gain
             except Exception as exc:  # noqa: BLE001 - never abandon the sweep
                 # A refused command is a diagnosable condition, not a reason
                 # to stop: the sweep still measures, just at the old gain.
@@ -1093,6 +1329,8 @@ class Engine:
         # repeat the work - a gain probe in particular is 340 ms of dead air.
         swept = sweeper is not None
         self._scan_source = None
+        self._sweep_range_index = None
+        self._sweep_gains = {}
         self._scan_wanted.clear()
         if sweeper is not None:
             self._scan_mailbox.put(
@@ -1136,6 +1374,11 @@ class Engine:
             self._end_scan()
             return
 
+        # Before the retune, so the window and the gain are already the ones
+        # this stretch of dial asked for by the time any of its samples are
+        # captured. The reader runs its queue in order between two reads, so
+        # the tune below cannot overtake them.
+        self._prepare_sweep_step(sweeper, park_audio=True)
         source.tune(sweeper.current_hz)
         iq = source.read(sweeper.dwell_samples)
         if iq is None:
@@ -1169,6 +1412,349 @@ class Engine:
                 bandwidth_hz=self._demod.bandwidth_hz,
                 squelch_open=None,
                 audio_latency_s=0.0,
+                underruns=0 if self.sink is None else self.sink.underruns,
+                ring_overruns=self.reader.ring.overruns,
+            )
+        )
+
+    # -- monitoring, on the DSP thread -------------------------------------
+
+    def _begin_monitor(self, monitor: Monitor) -> None:
+        """Take the radio for the length of the session.
+
+        Ordered exactly as `_begin_scan` is - the HD session ended first so
+        the window recorded is the one being listened through, then the
+        window, then the gain at the first step's frequency - because it is
+        the same borrowing with a longer lease. The audio sink is *not*
+        stopped here: `_run`'s parking rule owns that, and unlike every other
+        excursion in the app this one legitimately plays sound part of the
+        time.
+        """
+        if self.reader is None:
+            return
+        self._end_hd()
+        self._monitor_resume_rate = self.sample_rate
+        self._monitor = monitor
+        self._monitor_source = _ReaderSource(self.reader)
+        self._monitor_sweeper = self._new_monitor_sweeper()
+        self._monitor_playing = False
+        self._sweep_range_index = None
+        self._sweep_gains = {}
+        # The window and the gain for the first stretch of dial. The rest are
+        # set as the sweep reaches them, exactly as they are for a scan; the
+        # sink is left alone because `_run` owns the parking here.
+        self._prepare_sweep_step(self._monitor_sweeper, park_audio=False)
+
+    def _new_monitor_sweeper(self) -> Sweeper:
+        """One pass of the range, as a throwaway sweeper.
+
+        A single pass rather than the sweep's three, and that is the design
+        rather than a shortcut. The sweep's persistence gate exists so that a
+        list appearing after five seconds does not then reshuffle itself; here
+        the ledger *is* the persistence gate, and it is a better one - a
+        channel's sighting count is both what decides it is real and the
+        number the user came to this screen to see.
+        """
+        monitor = self._monitor
+        planned = self._monitor_ranges
+        if not planned:
+            low = monitor.low_hz if monitor is not None else 0.0
+            high = monitor.high_hz if monitor is not None else 0.0
+            planned = (SweepRange(low, high, float(self.sample_rate)),)
+        return Sweeper(
+            planned[0].low_hz,
+            planned[0].high_hz,
+            planned[0].sample_rate,
+            fft_size=self._spectrum.fft_size,
+            threshold_db=self._monitor_threshold_db,
+            passes=1,
+            ranges=planned,
+        )
+
+    def _monitor_command(self, action: str, frequency_hz: float) -> None:
+        """A Skip, Hold or Release from the screen, run on the DSP thread.
+
+        Queued rather than called directly for the same reason every other
+        control is: the monitor's state machine is read by `_monitor_step` on
+        this thread and nothing else may reach into it.
+        """
+        monitor = self._monitor
+        if monitor is None:
+            return
+        if action == "skip":
+            monitor.skip(frequency_hz)
+        elif action == "hold":
+            monitor.hold(frequency_hz)
+        elif action == "unskip":
+            monitor.unskip(frequency_hz)
+        else:
+            monitor.release_hold()
+        if monitor.phase != HOLDING:
+            # A skip while the radio was sitting on that very channel leaves
+            # it parked with nothing to do; put it back to sweeping and drop
+            # the audio with it.
+            self._end_audition()
+        self._monitor_mailbox.put(monitor.snapshot())
+
+    def _end_monitor(self) -> None:
+        """Give back the window, the tuner and the gain, in that order.
+
+        Reached from `stop_monitor`, which queues it unconditionally, so like
+        `_end_scan` and `_end_adsb` a second pass must not repeat the work: a
+        gain probe is 340 ms of dead air.
+        """
+        monitor, self._monitor = self._monitor, None
+        watched = monitor is not None
+        self._monitor_sweeper = None
+        self._monitor_source = None
+        self._monitor_ranges = ()
+        self._sweep_range_index = None
+        self._sweep_gains = {}
+        self._monitor_wanted.clear()
+        self._end_audition()
+        if monitor is not None:
+            self._monitor_mailbox.put(monitor.snapshot())
+        if self._monitor_resume_rate is not None:
+            if self._monitor_resume_rate != self.sample_rate:
+                self.sample_rate = self._monitor_resume_rate
+                if self.reader is not None:
+                    self.reader.set_sample_rate(self.sample_rate)
+                self._apply_sample_rate(self.sample_rate)
+            self._monitor_resume_rate = None
+        if watched and self.reader is not None:
+            # `center_hz` never moved, so this is a retune only in the
+            # hardware's terms - the same line `_end_adsb` ends on, and for
+            # the same reason.
+            self.reader.tune(self.device_center_hz)
+            self._probe_gain_directly("listening again")
+        self._commands.put(self._apply_hd)
+
+    def _monitor_step(self) -> None:
+        """One turn of the session: either a sweep step or a moment of audio."""
+        monitor = self._monitor
+        if monitor is None:
+            return
+        if monitor.target_hz is None:
+            self._monitor_sweep_step()
+        else:
+            self._monitor_listen_step()
+
+    def _monitor_sweep_step(self) -> None:
+        """Measure one tile, and decide what to do at the end of a pass."""
+        monitor, sweeper = self._monitor, self._monitor_sweeper
+        source = self._monitor_source
+        if monitor is None or sweeper is None or source is None:
+            return
+        # Same reasoning as the scan's: the window and the gain belong to the
+        # stretch of dial about to be measured, and a session watching six of
+        # them crosses a boundary several times a cycle.
+        self._prepare_sweep_step(sweeper, park_audio=False)
+        source.tune(sweeper.current_hz)
+        iq = source.read(sweeper.dwell_samples)
+        if iq is None:
+            self._end_monitor()
+            return
+        sweeper.feed(iq)
+        self._publish_scan_frame(sweeper)
+        if not sweeper.complete:
+            return
+
+        monitor.note_pass(sweeper.signals())
+        self._monitor_mailbox.put(monitor.snapshot())
+        target = monitor.choose_target()
+        if target is None:
+            self._monitor_sweeper = self._new_monitor_sweeper()
+            return
+        monitor.begin_audition(target)
+        if not self._begin_audition(target):
+            monitor.resume()
+            self._monitor_sweeper = self._new_monitor_sweeper()
+        self._monitor_mailbox.put(monitor.snapshot())
+
+    def _begin_audition(self, frequency_hz: float) -> bool:
+        """Park on one channel and build the receiver for it.
+
+        The tuner goes `TUNE_OFFSET_HZ` past the channel and the block is
+        shifted back in software, for the reason the sweep does the same
+        thing: the RTL2832U's own DC offset sits at the middle of the window,
+        and a narrow channel demodulated with that inside it has a thump on it
+        that no amount of gain will fix. The shift keeps its phase across
+        blocks, so a hold that lasts a minute has no seam in it.
+        """
+        monitor, source = self._monitor, self._monitor_source
+        if monitor is None or source is None:
+            return False
+        signal = monitor.signal_at(frequency_hz)
+        if signal is None:
+            return False
+        # Before anything is built, because both the receiver below and the
+        # shifter are designed around `self.sample_rate`. A session watching
+        # the AM band alongside anything else would otherwise audition an AM
+        # station through whatever window the sweep happened to stop on, and
+        # a 2.4 MHz window down there is the upconverter's own oscillator
+        # leak drowning the station - the fault `safe_sample_rate` exists for.
+        index = self._range_containing(frequency_hz)
+        if index is not None:
+            self._use_sweep_range(
+                index,
+                self._monitor_ranges[index].sample_rate,
+                int(round(frequency_hz)) + TUNE_OFFSET_HZ,
+                park_audio=False,
+            )
+        device_hz = safe_center_hz(int(round(frequency_hz)) + TUNE_OFFSET_HZ)
+        key = (signal.mode, float(signal.demod_bandwidth_hz), int(self.sample_rate))
+        if self._audition is None or key != self._audition_key:
+            try:
+                receiver = demod.create(
+                    signal.mode,
+                    float(self.sample_rate),
+                    bandwidth_hz=float(signal.demod_bandwidth_hz),
+                    volume=1.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - never abandon the session
+                # A mode or a width this window cannot build a receiver for.
+                # The channel simply goes un-listened-to; the sweep carries on
+                # and the ledger keeps counting it.
+                self.last_error = f"Could not listen to that channel: {exc}"
+                return False
+            receiver.clip = False
+            self._audition = receiver
+            self._audition_key = key
+        else:
+            self._audition.reset()
+        # The channel sits `frequency - device_hz` off the middle of the
+        # window, which is minus the offset above; shifting by its negation
+        # puts it at DC where the receiver's channel filter is centred.
+        self._audition_shift = FrequencyShifter(
+            float(self.sample_rate), float(device_hz) - float(frequency_hz)
+        )
+        self._audition_audio = []
+        self._audition_frames = 0
+        self._monitor_center_hz = device_hz
+        # Through the sweep's own source, which submits the retune, waits for
+        # the reader to run it between two reads, lets the PLL settle and
+        # then empties the ring. Anything already captured belongs to the tile
+        # this was sweeping a moment ago, and demodulating that as this
+        # channel would be listening to the wrong frequency entirely.
+        source.tune(device_hz)
+        return True
+
+    def _range_containing(self, frequency_hz: float) -> int | None:
+        """Which of the watched stretches of dial a channel sits in.
+
+        The narrowest one that holds it, for the same reason `bandplan.find`
+        picks the narrowest band: a selection may legitimately contain a
+        stretch nested inside another, and the specific one is the one whose
+        window preference was chosen with that channel in mind.
+        """
+        holding = [
+            index
+            for index, span in enumerate(self._monitor_ranges)
+            if span.low_hz <= frequency_hz <= span.high_hz
+        ]
+        if not holding:
+            return None
+        return min(holding, key=lambda index: self._monitor_ranges[index].width_hz)
+
+    def _end_audition(self) -> None:
+        """Drop the receiver and stop the sound. The sweep owns the radio again."""
+        self._audition_shift = None
+        self._audition_audio = []
+        self._audition_frames = 0
+        self._monitor_center_hz = None
+        self._monitor_playing = False
+
+    def _monitor_listen_step(self) -> None:
+        """A block of a channel the monitor is auditioning or holding.
+
+        One path for both, because they are the same receiver doing the same
+        work: the only differences are which question the answer is handed to
+        and whether the audio goes to the sound card.
+        """
+        monitor, reader = self._monitor, self.reader
+        receiver = self._audition
+        if monitor is None or reader is None or receiver is None:
+            return
+        target = monitor.target_hz
+        if target is None:
+            self._end_audition()
+            return
+        raw = reader.ring.read(self._block_bytes, timeout=0.5)
+        if raw is None:
+            if reader.last_error:
+                self.last_error = reader.last_error
+                self._end_monitor()
+            return
+        iq = convert.to_complex(raw)
+        if self._audition_shift is not None:
+            iq = self._audition_shift.process(iq)
+        audio = receiver.process(iq)
+        self._publish_monitor_frame(iq, receiver)
+        if not audio.size:
+            return
+
+        # Classified *before* the audio chain and played after it. That order
+        # is not tidiness: the AGC's whole job is to flatten the loudness
+        # swings that are the strongest evidence for speech, so a verdict
+        # taken from what reaches the sound card would report a rider's
+        # settings rather than what is on the air.
+        self._audition_audio.append(audio)
+        self._audition_frames += int(audio.shape[0])
+        if self._monitor_playing and self.sink is not None:
+            self.sink.write(self.audio.process(audio))
+
+        wanted = int(monitor.audition_s * demod.AUDIO_RATE)
+        if self._audition_frames < wanted:
+            return
+        clip = np.concatenate(self._audition_audio)
+        self._audition_audio = []
+        self._audition_frames = 0
+        verdict = voice.classify(clip, float(demod.AUDIO_RATE))
+        if monitor.phase == HOLDING:
+            staying = monitor.note_hold(target, verdict)
+        else:
+            staying = monitor.note_audition(target, verdict)
+            # The first window is what decides whether this is worth hearing,
+            # so the sound card only opens once the answer is yes. Opening it
+            # for every audition would put a click on the front of every
+            # channel the monitor merely glanced at.
+            self._monitor_playing = staying
+        if not staying:
+            self._end_audition()
+            self._monitor_sweeper = self._new_monitor_sweeper()
+        self._monitor_mailbox.put(monitor.snapshot())
+
+    def _publish_monitor_frame(
+        self, iq: np.ndarray, receiver: demod.Demodulator
+    ) -> None:
+        """Keep the picture alive while the radio is parked on one channel.
+
+        The spectrum is measured on the *shifted* block, so the channel being
+        listened to sits in the middle of it - which is both what a listener
+        expects and honest, because that is where the receiver is looking.
+        The frame is therefore labelled with the channel's frequency, not with
+        where the tuner is parked, which is `TUNE_OFFSET_HZ` away from it.
+        """
+        monitor = self._monitor
+        if monitor is None or monitor.target_hz is None or self.reader is None:
+            return
+        if self._carry.size:
+            iq = np.concatenate((self._carry, iq))
+        spectrum_db = self._spectrum.process(iq)
+        used = iq.size - (iq.size % self._spectrum.fft_size)
+        self._carry = iq[used:].copy()
+        if not spectrum_db.size:
+            return
+        self._mailbox.put(
+            DisplayFrame(
+                spectrum_db=spectrum_db,
+                center_hz=float(monitor.target_hz),
+                sample_rate=float(self.sample_rate),
+                bin_width_hz=self._spectrum.bin_width_hz,
+                channel_power_dbfs=receiver.channel_power_dbfs,
+                bandwidth_hz=receiver.bandwidth_hz,
+                squelch_open=None,
+                audio_latency_s=0.0 if self.sink is None else self.sink.latency_s,
                 underruns=0 if self.sink is None else self.sink.underruns,
                 ring_overruns=self.reader.ring.overruns,
             )
@@ -1859,10 +2445,16 @@ class Engine:
             # is worth seeing rather than papering over, and reopening the
             # sound card at every flutter would put a gap in the audio in
             # exactly the conditions that least need one.
+            # A monitor session is the one excursion that sometimes plays
+            # sound. It is parked while it sweeps and while it is deciding
+            # what a channel is, and unparked for as long as it holds one -
+            # which is the whole feature, so the question is asked of the
+            # session rather than assumed from the fact that one is running.
             parked = (
                 self.probing
                 or self._adsb is not None
                 or (self._hd is not None and not self._hd_acquired)
+                or (self._monitor is not None and not self._monitor_playing)
             )
             if parked != self._sink_parked:
                 self._sink_parked = parked
@@ -1870,6 +2462,14 @@ class Engine:
                     sink.stop()
                 else:
                     sink.start()
+
+            if self._monitor is not None:
+                # After the parking decision rather than before it, unlike the
+                # sweep above: a monitor session opens and closes the sound
+                # card as it goes, so it has to pass through here every turn
+                # instead of short-circuiting past it.
+                self._monitor_step()
+                continue
 
             raw = reader.ring.read(self._block_bytes, timeout=0.5)
             if raw is None:

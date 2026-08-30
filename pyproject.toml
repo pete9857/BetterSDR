@@ -2,7 +2,10 @@
 name = "bettersdr"
 version = "0.1.0"
 description = "A beginner-friendly SDR receiver for the RTL-SDR Blog V4"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD-PARTY.md"]
 dependencies = [
     "numpy>=2.3",
     "scipy>=1.16",
@@ -19,7 +22,7 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 bettersdr = "bettersdr.app:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

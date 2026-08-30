@@ -216,10 +216,22 @@ class Air:
         self.seed = int(seed)
         self.center = 0
         self.tuned_to: list[int] = []
+        self.rates: list[float] = []
 
     def tune(self, hz: int) -> None:
         self.center = int(hz)
         self.tuned_to.append(int(hz))
+
+    def set_sample_rate(self, hz: float) -> None:
+        """Answer a change of window, the way the real front end does.
+
+        A sweep of several stretches of dial changes the window at every
+        boundary - the AM band has to be measured through 240 kHz and FM
+        through 2.4 MHz - so synthetic air that only ever produces one width
+        cannot put that path under test.
+        """
+        self.rate = float(hz)
+        self.rates.append(float(hz))
 
     def read(self, samples: int) -> np.ndarray:
         # Only what is actually inside the window, exactly as the hardware

@@ -13,12 +13,18 @@ import pytest
 
 from bettersdr.decode.adsb import Aircraft
 from bettersdr.decode.pocsag import Page, PocsagState
-from bettersdr.scan import bandplan
+from bettersdr.scan import bandplan, monitor, voice
 from bettersdr.scan.classifier import Signal, Strength
 from bettersdr.ui import results
 from bettersdr.ui.levels import Level
 from bettersdr.ui.listen_view import band_headline
-from bettersdr.ui.widgets import aircraftcard, colormaps, pagerlog
+from bettersdr.ui.widgets import (
+    activitycard,
+    aircraftcard,
+    colormaps,
+    pagerlog,
+    rangepicker,
+)
 from bettersdr.ui.widgets.frequency import (
     DIGITS,
     digit_step_hz,
@@ -26,6 +32,7 @@ from bettersdr.ui.widgets.frequency import (
     nudge_digit,
 )
 from bettersdr.ui.widgets.planemap import (
+    HIT_RADIUS_PX,
     MIN_SPAN_NM,
     Projection,
     altitude_colour,
@@ -33,6 +40,7 @@ from bettersdr.ui.widgets.planemap import (
     fit,
     format_degrees,
     graticule_step,
+    nearest_aircraft,
     nice_number,
     scale_bar,
     update_trails,
@@ -468,6 +476,90 @@ def test_an_aircraft_with_no_position_has_no_trail():
     trails = {}
     update_trails(trails, [plane(callsign="ASA123")])
     assert trails == {}
+
+
+# -- clicking an aircraft on the map ---------------------------------------
+#
+# Both mistakes this can make look entirely ordinary on screen: selecting the
+# aircraft underneath the one aimed at, and selecting one that is nowhere near
+# the pointer because nothing else was closer.
+
+
+def _hit_setup():
+    """A projection and two aircraft a long way apart on it."""
+    projection = fit([(47.5, -122.5), (47.7, -122.1)], 800.0, 400.0)
+    north = plane(47.7, -122.1, icao=0x111111)
+    south = plane(47.5, -122.5, icao=0x222222)
+    return projection, (north, south)
+
+
+def test_a_click_on_an_aircraft_finds_that_aircraft():
+    projection, aircraft = _hit_setup()
+    for target in aircraft:
+        x, y = projection.to_pixel(target.latitude, target.longitude)
+        assert nearest_aircraft(projection, aircraft, x, y) == target.icao
+
+
+def test_a_click_on_empty_sky_is_a_click_on_nothing():
+    """Not "whichever is least far away" - the radius is what makes putting
+    a selection down possible at all."""
+    projection, aircraft = _hit_setup()
+    x, y = projection.to_pixel(47.7, -122.1)
+    assert nearest_aircraft(projection, aircraft, x, y + HIT_RADIUS_PX * 3) is None
+    assert nearest_aircraft(projection, (), x, y) is None
+
+
+def test_a_near_miss_still_counts():
+    """The symbol is smaller than anything anyone can point at."""
+    projection, aircraft = _hit_setup()
+    x, y = projection.to_pixel(47.7, -122.1)
+    assert nearest_aircraft(projection, aircraft, x + 8.0, y - 6.0) == 0x111111
+
+
+def test_the_nearer_of_two_wins():
+    projection, aircraft = _hit_setup()
+    x1, y1 = projection.to_pixel(47.7, -122.1)
+    x2, y2 = projection.to_pixel(47.5, -122.5)
+    midway = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+    towards_north = (
+        midway[0] + (x1 - midway[0]) * 0.98,
+        midway[1] + (y1 - midway[1]) * 0.98,
+    )
+    assert nearest_aircraft(projection, aircraft, *towards_north) == 0x111111
+
+
+def test_an_aircraft_with_no_position_cannot_be_clicked():
+    """It is not drawn, so it must not be selectable - otherwise a click on
+    open water selects something invisible."""
+    projection, _ = _hit_setup()
+    silent = plane(callsign="ASA123", icao=0x333333)
+    assert nearest_aircraft(projection, [silent], 400.0, 200.0) is None
+
+
+# -- the Lookup button's URL -----------------------------------------------
+
+
+def test_lookup_uses_the_address_because_every_aircraft_has_one():
+    assert aircraftcard.lookup_url("A1B2C3") == (
+        "https://flightaware.com/live/modes/A1B2C3/redirect"
+    )
+
+
+def test_a_callsign_narrows_the_lookup_to_todays_flight():
+    assert aircraftcard.lookup_url("A1B2C3", "ASA123") == (
+        "https://flightaware.com/live/modes/A1B2C3/ident/ASA123/redirect"
+    )
+
+
+def test_a_lookup_url_is_escaped_and_tidied():
+    """A callsign comes off the air eight characters wide, and what is left
+    after the padding is stripped is not guaranteed to be tidy."""
+    assert aircraftcard.lookup_url("a1b2c3", " asa 123 ") == (
+        "https://flightaware.com/live/modes/A1B2C3/ident/ASA%20123/redirect"
+    )
+    assert aircraftcard.lookup_url("A1B2C3", "   ") == (
+        "https://flightaware.com/live/modes/A1B2C3/redirect"
+    )
 
 
 # -- Discover list: ordering and filtering ---------------------------------
@@ -926,3 +1018,142 @@ def test_the_zoom_slider_is_the_same_ratio_at_both_ends():
 def test_the_slider_round_trips_through_the_zoom_it_sets(value: int):
     """Or the wheel and the slider fight each other one step at a time."""
     assert slider_for_zoom(zoom_for_slider(value)) == value
+
+
+# -- the monitor's card -----------------------------------------------------
+
+
+def test_how_long_ago_is_said_in_units_a_person_would_use():
+    """"last heard 214s ago" is a stopwatch reading, not an answer.
+
+    What the reader wants from this line is whether the channel is alive now,
+    alive lately, or a note about earlier - so the units change with the scale
+    rather than the number growing without bound.
+    """
+    assert activitycard.heard_phrase(0.0) == "just now"
+    assert activitycard.heard_phrase(1.4) == "just now"
+    assert activitycard.heard_phrase(9.0) == "9s ago"
+    assert activitycard.heard_phrase(59.0) == "59s ago"
+    assert activitycard.heard_phrase(214.0) == "4 min ago"
+    assert activitycard.heard_phrase(7200.0) == "2 h ago"
+
+
+def test_every_verdict_has_a_colour_and_only_voice_gets_the_accent():
+    """A row of bright badges says nothing; one does.
+
+    "This channel is static" is information the eye should skate over, so the
+    greys outnumber the colours deliberately.
+    """
+    for kind in (
+        voice.VOICE,
+        voice.MUSIC,
+        voice.DATA,
+        voice.TONE,
+        voice.NOISE,
+        voice.SILENCE,
+        voice.UNCLEAR,
+    ):
+        assert kind in activitycard.SOUND_COLOURS
+    greys = [
+        kind
+        for kind, colour in activitycard.SOUND_COLOURS.items()
+        if colour == "#6d7b89"
+    ]
+    assert len(greys) > len(activitycard.SOUND_COLOURS) - len(greys)
+
+
+def test_an_activity_can_be_summarised_by_the_chip_code():
+    """`results.summarise` is handed activities, not the signals inside them.
+
+    It duck-types on `label` and `icon`, and the monitor's list must carry
+    both - a chip counting a channel under a name its card no longer shows
+    would hide the wrong rows.
+    """
+    signal = _found(155.0, 20.0, "Two-way radio", "walkie")
+    activity = monitor.Activity(
+        signal=signal,
+        sightings=3,
+        passes=4,
+        first_heard=0.0,
+        last_heard=1.0,
+        snr_db=20.0,
+        peak_snr_db=22.0,
+        active=True,
+        verdict=None,
+        auditions=1,
+        voice_heard=1,
+        skipped=False,
+        held=False,
+        now=2.0,
+    )
+    assert activity.label == signal.label
+    assert activity.icon == signal.icon
+    kinds = results.summarise([activity])
+    assert kinds[0].label == "Two-way radio"
+    assert kinds[0].count == 1
+
+
+# -- the whole-dial range picker ---------------------------------------------
+#
+# The Expert discovery screen replaces the band chips with every stretch of
+# dial the dongle can reach. Three things in it are arithmetic hiding inside a
+# widget, and all three are places a quiet mistake would look plausible: the
+# label, the step count that decides whether a sweep is five seconds or two
+# minutes, and the merge that turns ticked boxes into ranges.
+
+
+def test_a_range_is_labelled_by_its_span_first():
+    """Two stretches are both called Federal government; no two start alike."""
+    fm = bandplan.Segment.of(
+        next(band for band in bandplan.load() if band.name == "FM Radio")
+    )
+    assert rangepicker.span_label(fm) == "88 MHz-108 MHz: FM Radio"
+
+
+def test_the_step_count_is_the_one_the_sweep_will_really_use():
+    """A count derived from width alone is out by ten at the bottom of the
+    dial: the AM band is swept through a 240 kHz window, not a 2.4 MHz one."""
+    assert rangepicker.step_count(((88_000_000, 108_000_000, None),)) == 12
+    assert rangepicker.step_count(((530_000, 1_700_000, 240_000),)) == 9
+    assert rangepicker.step_count(
+        ((530_000, 1_700_000, 240_000), (88_000_000, 108_000_000, None))
+    ) == 21
+
+
+def test_a_range_with_no_stated_window_still_gets_a_safe_one():
+    beacons = next(
+        segment
+        for segment in bandplan.coverage(500_000, 1_766_000_000)
+        if segment.start_hz == 500_000
+    )
+    assert beacons.sample_rate_hz is None
+    assert rangepicker.effective_rate(beacons) < 2_400_000
+
+
+def test_how_long_a_sweep_will_take_is_said_before_it_is_started():
+    """A two-minute progress bar nobody was warned about reads as a hang."""
+    assert "s a pass" in rangepicker.duration_phrase(12)
+    assert "min a pass" in rangepicker.duration_phrase(991)
+
+
+def test_the_summary_names_one_range_and_counts_several():
+    segments = bandplan.coverage(500_000, 1_766_000_000)
+    by_name = {segment.name: segment for segment in segments}
+    assert rangepicker.summarise(()).startswith("Nothing selected")
+    assert rangepicker.summarise((by_name["FM Radio"],)).startswith("FM Radio")
+    two = rangepicker.summarise((by_name["FM Radio"], by_name["AM Radio"]))
+    assert two.startswith("2 ranges")
+
+
+def test_ranges_for_merges_what_touches_and_shares_a_window():
+    segments = bandplan.coverage(500_000, 1_766_000_000)
+    by_name = {segment.name: segment for segment in segments}
+    assert rangepicker.ranges_for(
+        [by_name["Business and public safety"], by_name["Marine VHF"]]
+    ) == ((150_800_000, 162_025_000, 2_400_000),)
+    assert rangepicker.ranges_for(
+        [by_name["AM Radio"], by_name["Long-distance fixed links"]]
+    ) == (
+        (530_000, 1_700_000, 240_000),
+        (1_700_000, 1_800_000, 2_400_000),
+    )

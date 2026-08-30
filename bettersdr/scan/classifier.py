@@ -70,6 +70,13 @@ WIDTH_TRUSTED_SNR_DB = 35.0
 # nothing, because it is a confident statement about the wrong thing.
 SHAPE_TRUSTED_SNR_DB = 15.0
 
+# The label for a signal whose power is all on one steady tone. Named because
+# two other modules have to recognise it: it is the reading a short dwell
+# produces from a real transmitter caught between two words, so anything with
+# better evidence - the monitor, which actually listens to the channel - has to
+# be able to tell that this is the reading it is contradicting.
+UNMODULATED = "Unmodulated carrier"
+
 CONFIDENCE_BAND_AND_SHAPE = 0.95
 CONFIDENCE_BAND_ONLY = 0.60
 CONFIDENCE_SHAPE_ONLY = 0.45
@@ -243,7 +250,7 @@ def _shape_only(
         return ("Unknown signal", "question", "raw", max(width, 12_500.0),
                 CONFIDENCE_UNKNOWN, "too faint to make anything of")
     if shape.has_carrier and width <= 1_500:
-        return ("Unmodulated carrier", "wave", "cw", 500.0, CONFIDENCE_SHAPE_ONLY,
+        return (UNMODULATED, "wave", "cw", 500.0, CONFIDENCE_SHAPE_ONLY,
                 "a bare tone with no modulation on it")
     if shape.looks_digital:
         return ("Digital signal", "chip", "raw", max(width, 12_500.0),
@@ -318,7 +325,7 @@ def classify(
             and not band.continuous
         )
         if bare_carrier:
-            label, icon, mode = "Unmodulated carrier", "wave", band.mode
+            label, icon, mode = UNMODULATED, "wave", band.mode
             demod_bw = band.bandwidth_hz
             description = (
                 f"A steady tone with nothing on it, in the part of the dial "
@@ -408,6 +415,7 @@ def classify(
 __all__ = [
     "CARRIER_FRACTION",
     "DIGITAL_FLATNESS",
+    "UNMODULATED",
     "Shape",
     "Signal",
     "Strength",
