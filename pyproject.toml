@@ -26,7 +26,11 @@ build-backend = "setuptools.build_meta"
 include = ["bettersdr*"]
 
 [tool.setuptools.package-data]
-bettersdr = ["scan/bandplan/*.yaml", "ui/basemap/*.bsm"]
+bettersdr = [
+    "scan/bandplan/*.yaml",
+    "ui/basemap/*.bsm",
+    "ui/learn/*.yaml",
+]
 
 [tool.ruff]
 line-length = 90

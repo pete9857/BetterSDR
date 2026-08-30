@@ -32,11 +32,12 @@ GLYPHS = {
     "pager": "\N{PAGER}",
     "chip": "\N{ANTENNA WITH BARS}",
     "wave": "\N{WAVY DASH}",
-    # Not band-plan icons: these two mark the quick-tune chips, where the
-    # difference between "you chose this" and "you happened to hear this" is
-    # the only thing distinguishing two otherwise identical buttons.
-    "star": "\N{WHITE MEDIUM STAR}",
-    "clock": "\N{CLOCK FACE THREE OCLOCK}",
+    # Not band-plan icons: these two point along the Discover list, from
+    # either side of the frequency readout. Triangles rather than arrows,
+    # which Windows renders as emoji - a head taller than the word beside
+    # them and in somebody else's colour.
+    "left": "\N{BLACK LEFT-POINTING TRIANGLE}",
+    "right": "\N{BLACK RIGHT-POINTING TRIANGLE}",
     "question": "\N{BLACK QUESTION MARK ORNAMENT}",
 }
 

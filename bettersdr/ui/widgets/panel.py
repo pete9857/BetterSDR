@@ -24,6 +24,14 @@ off, so the surplus was simply cut off the right-hand edge: buttons lost the
 end of their centred captions and every spin box lost its arrows. Every field
 is passed through `fit_to_column` on the way in, which is what keeps the
 column honest.
+
+**A row can say what it means.** Passing `topic=` makes the caption a link
+into the Learn tab - see `widgets/help.py` - and the panel gathers every one
+of them onto a single `helpRequested`, so the listening screen connects once
+rather than forty times. It is one more word at the call site, exactly like
+`level`, and for the same reason: explaining a control belongs where the
+control is declared, not in a second list that will drift out of step with
+this one.
 """
 
 from __future__ import annotations
@@ -31,11 +39,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtCore import Signal as QtSignal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -43,7 +53,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..learn import has
 from ..levels import Level
+from .help import HelpButton, HelpLabel, label_for
 
 # Wide enough for the longest label plus a field at a usable size, once
 # `fit_to_column` has stopped the combo boxes asking for more. Measured, not
@@ -132,10 +144,15 @@ class Section:
         level: Level,
         layout: QFormLayout,
         first: bool = False,
+        on_help: Callable[[str], None] | None = None,
     ) -> None:
         self.level = level
         self._layout = layout
+        self._on_help = on_help
         self._rows: list[tuple[QWidget, Level]] = []
+        # Every help affordance in this section, so a caller can check what a
+        # built panel actually offers without walking the widget tree.
+        self.topics: list[str] = []
 
         self.header = QLabel(title.upper())
         self.header.setObjectName("sectionTitle")
@@ -144,23 +161,59 @@ class Section:
         self.header.setProperty("firstSection", "true" if first else "false")
         layout.addRow(self.header)
 
-    def add(self, label: str, widget: QWidget, level: Level | None = None) -> QWidget:
-        """A labelled row. `level` defaults to the section's own."""
+    def _armed(self, widget: HelpLabel | HelpButton, topic: str) -> None:
+        widget.helpRequested.connect(self._on_help)
+        self.topics.append(topic)
+
+    def add(
+        self,
+        label: str,
+        widget: QWidget,
+        level: Level | None = None,
+        topic: str = "",
+    ) -> QWidget:
+        """A labelled row. `level` defaults to the section's own.
+
+        `topic` makes the caption itself the way in to what it means, which is
+        the whole reason this is here rather than in a lookup table keyed on
+        the caption text: two rows are called "Threshold" and they are not the
+        same threshold.
+        """
         at = self.level if level is None else level
-        caption = QLabel(label)
-        caption.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
+        caption = label_for(label, topic)
+        if isinstance(caption, HelpLabel) and self._on_help is not None:
+            self._armed(caption, topic)
         self._layout.addRow(caption, fit_to_column(widget))
         self._rows.append((caption, at))
         self._rows.append((widget, at))
         return widget
 
-    def add_wide(self, widget: QWidget, level: Level | None = None) -> QWidget:
-        """A row with no caption, for buttons and checkboxes that read alone."""
+    def add_wide(
+        self, widget: QWidget, level: Level | None = None, topic: str = ""
+    ) -> QWidget:
+        """A row with no caption, for buttons and checkboxes that read alone.
+
+        A check box carries its own text, and clicking that text has to keep
+        toggling it - so the way in to the explanation is a question mark
+        beside the row rather than the row itself. The returned widget is
+        still the one that was passed in; only what the layout holds changes.
+        """
         at = self.level if level is None else level
-        self._layout.addRow(fit_to_column(widget))
-        self._rows.append((widget, at))
+        fit_to_column(widget)
+        row: QWidget = widget
+        if topic and has(topic) and self._on_help is not None:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(4)
+            line.addWidget(widget, 1)
+            button = HelpButton(topic)
+            self._armed(button, topic)
+            line.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._layout.addRow(row)
+        # The container, not the child: hiding only the check box would leave
+        # an empty row the height of a control at every level below its own.
+        self._rows.append((row, at))
         return widget
 
     def apply_level(self, level: Level) -> bool:
@@ -176,6 +229,11 @@ class Section:
 
 class ControlPanel(QScrollArea):
     """A scrolling column of `Section`s."""
+
+    # Somebody clicked a control's name wanting to know what it means. The
+    # panel gathers every row's affordance onto this one signal, so the view
+    # above it connects once and knows nothing about which rows offer it.
+    helpRequested = QtSignal(str)
 
     def __init__(self, width: int = PANEL_WIDTH, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -216,13 +274,29 @@ class ControlPanel(QScrollArea):
         self._sections: list[Section] = []
 
     def section(self, title: str, level: Level = Level.STANDARD) -> Section:
-        section = Section(title, level, self._form, first=not self._sections)
+        section = Section(
+            title,
+            level,
+            self._form,
+            first=not self._sections,
+            on_help=self.helpRequested.emit,
+        )
         self._sections.append(section)
         return section
 
     def set_level(self, level: Level) -> None:
         for section in self._sections:
             section.apply_level(level)
+
+    @property
+    def topics(self) -> tuple[str, ...]:
+        """Every topic this panel offers a way in to, in the order built.
+
+        Exists for the test that asserts each one actually has an article
+        behind it. A control that looks like a link and does nothing is the
+        one failure this feature can have that nobody would report.
+        """
+        return tuple(topic for section in self._sections for topic in section.topics)
 
 
 def on_change(widget: QWidget, slot: Callable[..., None]) -> None:

@@ -22,6 +22,47 @@ DEFAULT_REGION = "us"
 
 
 @dataclass(frozen=True)
+class Channel:
+    """One named channel inside a band.
+
+    Two names, because a beginner and a regulator call the same thing
+    different things and both are worth showing: `name` is what somebody
+    would say out loud - "Channel 16" - and `official` is the designation it
+    carries in the rule book, which is the phrase to search for and the one
+    printed on a chart. `use` is the plain-English half, written to the same
+    standard as `Band.description`.
+    """
+
+    name: str
+    frequency_hz: int
+    use: str
+    official: str = ""
+
+
+@dataclass(frozen=True)
+class Allocation:
+    """What a stretch of dial with nothing to listen to is licensed for.
+
+    Deliberately not a `Band`: nothing tunes from these, nothing scans them
+    and the classifier never sees them. They exist so that the listening
+    screen can answer "what is this part of the dial?" everywhere, instead of
+    only where the app has something to offer.
+    """
+
+    name: str
+    start_hz: int
+    end_hz: int
+    use: str
+
+    @property
+    def width_hz(self) -> int:
+        return self.end_hz - self.start_hz
+
+    def contains(self, hz: float) -> bool:
+        return self.start_hz <= hz <= self.end_hz
+
+
+@dataclass(frozen=True)
 class Band:
     """One allocation, as the user should hear it described."""
 
@@ -59,6 +100,12 @@ class Band:
     # Same measurement, opposite meaning, and the band is what tells them
     # apart.
     continuous: bool = False
+    # The named channels inside this band, where it has any. Marine VHF is
+    # the case that forced them: "156.800 MHz" and "Channel 16" are the same
+    # fact, and only one of them is what anybody on a boat would say. Bands
+    # whose channels have no names - AM and FM broadcast - have none here,
+    # because a number that is already the name is not worth repeating.
+    channels: tuple[Channel, ...] = ()
 
     @property
     def center_hz(self) -> float:
@@ -86,14 +133,57 @@ class Band:
         )
         return base + round((hz - base) / self.raster_hz) * self.raster_hz
 
+    def channel(self, hz: float) -> Channel | None:
+        """The named channel at `hz`, if this band has one there.
+
+        Half a channel either side, taken from the raster where the band has
+        one and from the channel width where it does not - so tuning between
+        two marine channels names neither, rather than naming whichever is a
+        hertz closer.
+        """
+        if not self.channels:
+            return None
+        tolerance = (self.raster_hz or self.bandwidth_hz) / 2.0
+        nearest = min(self.channels, key=lambda ch: abs(ch.frequency_hz - hz))
+        if abs(nearest.frequency_hz - hz) > tolerance:
+            return None
+        return nearest
+
+
+def _prose(text: str) -> str:
+    """A folded YAML scalar as one line of prose."""
+    return " ".join(str(text).split())
+
+
+@functools.lru_cache(maxsize=4)
+def _read(region: str = DEFAULT_REGION) -> dict:
+    path = BANDPLAN_DIR / f"{region}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"no band plan for region {region!r} at {path}")
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _channels(entry: dict) -> tuple[Channel, ...]:
+    return tuple(
+        sorted(
+            (
+                Channel(
+                    name=channel["name"],
+                    frequency_hz=int(channel["hz"]),
+                    use=_prose(channel.get("use", "")),
+                    official=_prose(channel.get("official", "")),
+                )
+                for channel in entry.get("channels", [])
+            ),
+            key=lambda channel: channel.frequency_hz,
+        )
+    )
+
 
 @functools.lru_cache(maxsize=4)
 def load(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
     """Every band for a region, ordered by frequency."""
-    path = BANDPLAN_DIR / f"{region}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"no band plan for region {region!r} at {path}")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = _read(region)
     bands = [
         Band(
             name=entry["name"],
@@ -101,7 +191,7 @@ def load(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
             end_hz=int(entry["end_hz"]),
             mode=entry.get("mode", "nfm"),
             bandwidth_hz=float(entry.get("bandwidth_hz", 12_500)),
-            description=" ".join(entry.get("description", "").split()),
+            description=_prose(entry.get("description", "")),
             colour=entry.get("colour", "#7a7a7a"),
             icon=entry.get("icon", ""),
             raster_hz=(
@@ -117,10 +207,30 @@ def load(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
                 int(entry["sample_rate_hz"]) if entry.get("sample_rate_hz") else None
             ),
             continuous=bool(entry.get("continuous", False)),
+            channels=_channels(entry),
         )
         for entry in raw.get("bands", [])
     ]
     return tuple(sorted(bands, key=lambda band: band.start_hz))
+
+
+@functools.lru_cache(maxsize=4)
+def allocations(region: str = DEFAULT_REGION) -> tuple[Allocation, ...]:
+    """What the gaps between the bands are licensed for, in frequency order."""
+    return tuple(
+        sorted(
+            (
+                Allocation(
+                    name=entry["name"],
+                    start_hz=int(entry["start_hz"]),
+                    end_hz=int(entry["end_hz"]),
+                    use=_prose(entry.get("use", "")),
+                )
+                for entry in _read(region).get("allocations", [])
+            ),
+            key=lambda allocation: allocation.start_hz,
+        )
+    )
 
 
 def scannable(region: str = DEFAULT_REGION) -> tuple[Band, ...]:
@@ -141,6 +251,19 @@ def find(hz: float, region: str = DEFAULT_REGION) -> Band | None:
     return min(matches, key=lambda band: band.width_hz)
 
 
+def official(hz: float, region: str = DEFAULT_REGION) -> Allocation | None:
+    """Who owns `hz`, for a frequency no band covers.
+
+    Independent of `find` on purpose: a band already describes itself, and
+    this list only speaks for the space between them. Callers ask it when
+    `find` came back empty.
+    """
+    matches = [a for a in allocations(region) if a.contains(hz)]
+    if not matches:
+        return None
+    return min(matches, key=lambda allocation: allocation.width_hz)
+
+
 def overlapping(
     low_hz: float, high_hz: float, region: str = DEFAULT_REGION
 ) -> list[Band]:
@@ -152,4 +275,27 @@ def overlapping(
     ]
 
 
-__all__ = ["Band", "DEFAULT_REGION", "find", "load", "overlapping", "scannable"]
+def overlapping_allocations(
+    low_hz: float, high_hz: float, region: str = DEFAULT_REGION
+) -> list[Allocation]:
+    """Every allocation intersecting a span, for the ribbon's empty stretches."""
+    return [
+        allocation
+        for allocation in allocations(region)
+        if allocation.end_hz >= low_hz and allocation.start_hz <= high_hz
+    ]
+
+
+__all__ = [
+    "Allocation",
+    "Band",
+    "Channel",
+    "DEFAULT_REGION",
+    "allocations",
+    "find",
+    "load",
+    "official",
+    "overlapping",
+    "overlapping_allocations",
+    "scannable",
+]

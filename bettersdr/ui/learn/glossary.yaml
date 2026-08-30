@@ -1,0 +1,1514 @@
+# The Learn tab's content.
+#
+# Data, like the band plan and the basemap: a second language, or a rewrite
+# for a different audience, is a second file rather than a second code path.
+#
+# Every entry is:
+#   slug     what the app links to. Never change one - control labels point
+#            at these, and a dead link is a click that does nothing.
+#   title    the heading, and what an inline [[slug]] link reads as.
+#   summary  ONE sentence, and it has to stand alone: it is what shows in the
+#            browse list and in search results, so somebody skimming has to be
+#            able to decide from it whether to open the article.
+#   body     paragraphs. Plain English first, the number second. [[slug]] or
+#            [[slug|other words]] links to another article.
+#   where    optional - where in the app the control actually is. A glossary
+#            that explains a control without saying where it lives is a
+#            crossword clue.
+#   also     optional - other things this is called. Searched, and shown under
+#            the title, because the whole problem is that the reader met the
+#            word somewhere else.
+#   see      optional - slugs, offered at the foot of the article.
+#
+# Category order is the order a beginner meets these things, not the alphabet.
+# Article order inside a category is the same.
+
+categories:
+
+  - name: Start here
+    articles:
+
+      - slug: radio-waves
+        title: What a radio signal is
+        summary: >
+          Radio is light you cannot see, and a receiver is an eye built for it.
+        body:
+          - >
+            Anything that transmits - a broadcast tower, a phone, an aircraft,
+            a garage door remote - works by pushing electricity back and forth
+            in a piece of metal. That wobble spreads outwards at the speed of
+            light, and any other piece of metal it washes over wobbles a little
+            in sympathy. That second wobble, a few millionths of a volt, is
+            what your [[antenna]] hands the dongle.
+          - >
+            How fast the wobble is is its [[frequency]]. An FM station at
+            94.9 MHz is pushing its aerial back and forth ninety-four million,
+            nine hundred thousand times every second.
+          - >
+            Everything on the air is doing this at once, in the same air, on
+            different frequencies. Sorting them apart is the whole job of a
+            receiver, and it is why you tune.
+        see: [frequency, band, antenna, modulation]
+
+      - slug: frequency
+        title: Frequency
+        summary: >
+          How fast a signal wobbles, and therefore which station it is.
+        also: [hertz, Hz, kHz, MHz, megahertz, kilohertz]
+        body:
+          - >
+            Frequency is counted in hertz - wobbles per second. A thousand of
+            them is a kilohertz (kHz), a million is a megahertz (MHz). The
+            numbers on any radio dial are frequencies - 94.9 on the FM dial
+            means 94.9 MHz.
+          - >
+            Two transmitters on different frequencies can share the same air
+            without interfering, which is why the dial has room for everybody.
+            Tuning is choosing which one you want.
+          - >
+            This dongle can hear anything from 500 kHz to about 1,766 MHz -
+            far more than a car radio, which is why the app shows you a
+            [[band-plan|band plan]] rather than expecting you to know what is
+            where.
+        see: [band, band-plan, spectrum]
+
+      - slug: band
+        title: A band
+        summary: >
+          A stretch of the dial set aside for one kind of user.
+        body:
+          - >
+            The dial is not a free-for-all. Regulators divide it into bands and
+            hand each one to a particular use: 88 to 108 MHz is broadcast FM,
+            118 to 137 MHz is aircraft, 162.400 to 162.550 MHz is weather
+            radio. Everybody on a band uses roughly the same [[modulation]] and
+            the same [[bandwidth]], because that is a condition of being
+            allowed there.
+          - >
+            That is enormously useful to a receiver. Knowing which band a
+            signal is in tells the app how to listen to it before it has heard
+            a single sample, which is why tuning into a new band changes the
+            [[mode]] and the [[bandwidth]] for you.
+        see: [band-plan, mode, bandwidth, channel]
+
+      - slug: modulation
+        title: Modulation
+        summary: >
+          How sound, or data, is written onto a radio wave.
+        body:
+          - >
+            A bare radio wave carries nothing - it is a pure tone, endlessly
+            repeating. To carry anything it has to be varied, and modulation is
+            the name for how. Vary its loudness and you have [[am|AM]]. Vary
+            its frequency slightly and you have [[wfm|FM]]. Those two cover
+            most of what you will hear.
+          - >
+            A receiver has to undo whatever was done, which is why picking the
+            wrong [[mode]] gives you a noise rather than a quieter version of
+            the station. It is not listening wrongly, it is answering a
+            different question.
+        see: [mode, wfm, nfm, am, ssb]
+
+      - slug: antenna
+        title: Antenna
+        summary: >
+          The piece of metal that catches the signal, and the single biggest
+          thing you can change.
+        also: [aerial]
+        body:
+          - >
+            No amount of setting adjustment beats a better antenna. A receiver
+            can only work with what arrives at its input, and nothing
+            downstream can put back a signal the antenna never caught.
+          - >
+            Length matters, and it depends what you are listening to. The small
+            telescopic aerials in the kit are about right for aircraft and
+            weather radio. Broadcast FM wants something longer. The AM
+            broadcast band wants something much longer than anything in the
+            box, which is why AM often sounds thin indoors.
+          - >
+            Height and position matter as much as length. A window helps
+            enormously; a desk in the middle of a room does not. If the app
+            says the front end is overloaded, a shorter antenna is genuinely
+            the fix - see [[rf-gain]].
+        see: [rf-gain, noise-floor, bias-tee]
+
+      - slug: noise-floor
+        title: The noise floor
+        summary: >
+          The permanent background hiss that everything else has to stand
+          above.
+        body:
+          - >
+            Point a receiver at an empty frequency and it is not silent. It
+            hears the thermal rustle of its own electronics, plus every phone
+            charger, LED bulb and computer within reach. Drawn on the
+            [[spectrum]], that is the ragged line along the bottom - the noise
+            floor.
+          - >
+            A signal is audible when it stands above that line. How far above
+            is its [[snr|signal to noise ratio]], and it is a much more useful
+            number than raw strength: a weak signal in a quiet place is easier
+            to hear than a strong one in a noisy one.
+          - >
+            Most of what raises the noise floor indoors is your own building.
+            Switching off a nearby cheap USB charger is often worth more than
+            any control in this app.
+        see: [snr, spectrum, decibel, sensitivity]
+
+      - slug: sdr
+        title: Software defined radio
+        summary: >
+          A radio where the tuning knob and the filters are code, not
+          components.
+        also: [SDR, dongle, RTL-SDR]
+        body:
+          - >
+            An ordinary radio does its work in hardware - a circuit tuned to
+            one band, a filter cut for one bandwidth, a detector wired for one
+            [[mode]]. A software defined radio does almost none of that. The
+            dongle digitises a wide slice of the dial and hands the raw numbers
+            to the computer, which does the tuning, filtering and demodulating
+            in software.
+          - >
+            That is why one small dongle can be an FM radio, an aircraft
+            receiver, a pager decoder and a spectrum analyser without any
+            hardware changing. It is also why this app can show you the
+            [[spectrum]] at all: the samples were always there, an ordinary
+            radio just had no way to draw them.
+          - >
+            The trade is that everything is now a setting, which is exactly the
+            problem this app was written to solve.
+        see: [iq, sample-rate, spectrum]
+
+  - name: Listening
+    articles:
+
+      - slug: mode
+        title: Mode
+        summary: >
+          Which kind of modulation to undo - the single most important
+          setting.
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            Pick the wrong mode and a perfectly strong station sounds like a
+            noise, a whistle, or nothing at all. Pick the right one and it
+            sounds like a radio.
+          - >
+            You mostly do not have to choose. Tuning into a new [[band|band]] adopts
+            that band's usual mode automatically, because the mode is a
+            condition of the licence there - aircraft is always [[am|AM]],
+            broadcast FM is always [[wfm|wide FM]]. A deliberate choice sticks
+            until you leave the band.
+          - >
+            The modes are [[wfm|wide FM]], [[nfm|narrow FM]], [[am|AM]],
+            [[ssb|USB and LSB]], [[cw|CW]], DSB and raw. The last is not
+            listening at all - it hands you the untouched signal, which is
+            useful for looking rather than hearing.
+        see: [wfm, nfm, am, ssb, cw, bandwidth, band-plan]
+
+      - slug: wfm
+        title: Wide FM
+        summary: >
+          The mode broadcast music stations use, and the reason FM sounds
+          good.
+        also: [WFM, broadcast FM, FM]
+        body:
+          - >
+            Wide FM spends about 150 kHz of dial on one station - more than ten
+            ordinary two-way channels - and buys clean, full-range, often
+            [[stereo|stereo]] audio with it. That is the whole bargain of the
+            broadcast FM band.
+          - >
+            It also explains why a wide FM station is hard to mistake for
+            anything else on the [[spectrum]]: it is a broad, flat-topped block
+            rather than a spike.
+          - >
+            Broadcast FM carries extras in the space above the audio -
+            [[rds|the station's name]], and on some stations a whole
+            [[hd-radio|digital signal]].
+        see: [nfm, bandwidth, stereo, rds, deemphasis]
+
+      - slug: nfm
+        title: Narrow FM
+        summary: >
+          The mode two-way radio uses - police, marine, weather, taxis,
+          amateurs.
+        also: [NFM, FM narrow]
+        body:
+          - >
+            Narrow FM is the same idea as [[wfm|wide FM]] squeezed into about
+            12.5 kHz instead of 150. The audio is speech-quality rather than
+            music-quality, which is all a two-way conversation needs, and
+            twelve times as many users fit in the same stretch of dial.
+          - >
+            Almost everything above 30 MHz that is not broadcasting is narrow
+            FM. It is the right first guess for a mystery signal in that range.
+          - >
+            Because these channels are silent between transmissions, they are
+            normally listened to with [[squelch]] on.
+        see: [wfm, squelch, bandwidth, pocsag]
+
+      - slug: am
+        title: AM
+        summary: >
+          The oldest mode, still used for aircraft and the AM broadcast band.
+        also: [amplitude modulation]
+        body:
+          - >
+            AM varies the strength of the wave rather than its frequency. It is
+            simple, which is why it came first, and it is fragile - electrical
+            noise is also a variation in strength, so AM picks up every buzz
+            and crackle around it.
+          - >
+            Aircraft still use it, and for a good reason: when two pilots
+            transmit at once, AM lets you hear both, whereas FM would give you
+            only the stronger. On an airband channel that is a safety feature.
+          - >
+            On the AM broadcast band the transmitter radiates continuously and
+            only the sidebands follow the programme, so a channel with nobody
+            talking still shows a strong steady carrier. That is normal there
+            and means something quite different from the same picture on the
+            airband.
+        see: [ssb, mode, unmodulated-carrier, sample-rate]
+
+      - slug: ssb
+        title: Single sideband
+        summary: >
+          A stripped-down AM that amateurs and long-distance stations use, and
+          the reason some voices sound like ducks.
+        also: [USB, LSB, upper sideband, lower sideband, sideband]
+        body:
+          - >
+            An [[am|AM]] signal wastes most of its power on a carrier that
+            carries nothing, and sends the same information twice, once either
+            side of it. Single sideband throws away the carrier and one copy.
+            The same transmitter then goes several times further.
+          - >
+            The price is that the receiver has to put the carrier back itself,
+            at exactly the right frequency. A few hundred hertz out and every
+            voice sounds comically high or low - the classic donald-duck
+            effect. That is not a fault, it is the dial being slightly off.
+          - >
+            By convention amateurs use lower sideband (LSB) below 10 MHz and
+            upper sideband (USB) above it. If a voice is unintelligible in one,
+            try the other.
+        see: [am, cw, bandwidth, ppm]
+
+      - slug: cw
+        title: CW
+        summary: >
+          Morse code, heard as a tone the receiver invents.
+        also: [morse, continuous wave]
+        body:
+          - >
+            A Morse transmitter simply switches its carrier on and off. There
+            is nothing to demodulate and nothing to hear - a bare carrier is
+            silent. So a CW receiver deliberately tunes slightly off and turns
+            the difference into an audible tone, which beeps in time with the
+            keying.
+          - >
+            CW uses an extremely narrow [[bandwidth]] - a few hundred hertz -
+            which is why it gets through when nothing else does, and why the
+            [[bandwidth]] control matters more here than anywhere else.
+        see: [ssb, bandwidth, filter-edge]
+
+      - slug: bandwidth
+        title: Bandwidth
+        summary: >
+          How wide a slice of dial you listen to - too narrow muffles, too wide
+          lets the neighbours in.
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            Every signal occupies a range of frequencies, not a single one. The
+            bandwidth control sets how much of that range gets through to your
+            ears. Set it to match the signal and you hear the signal and
+            nothing else.
+          - >
+            Too narrow and the edges of the signal are cut off - music goes
+            dull, speech goes muffled. Too wide and the station on the next
+            channel comes in as well, along with more [[noise-floor|noise]],
+            because a wider window collects more of it.
+          - >
+            The usual figures are about 150 kHz for [[wfm|broadcast FM]],
+            12.5 kHz for [[nfm|two-way FM]], 8 kHz for [[am|AM]] broadcast,
+            2.4 kHz for [[ssb|voice sideband]] and 500 Hz for [[cw|Morse]]. The
+            app sets these for you from the [[band-plan|band plan]]; the
+            control is there for when you disagree.
+        see: [mode, filter-edge, band-plan, snr]
+
+      - slug: squelch
+        title: Squelch
+        summary: >
+          Mutes the hiss between transmissions, so a quiet channel stays quiet.
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            A [[nfm|two-way channel]] is silent most of the time, and silence
+            on FM is not quiet - it is a loud rush of noise. Squelch mutes the
+            audio whenever what is arriving is only noise, and unmutes the
+            instant a real transmission starts.
+          - >
+            The threshold is where you draw that line, and it is a compromise.
+            Too sensitive and the hiss leaks through between calls. Too high
+            and the start of every transmission is clipped, or a weak station
+            never opens it at all.
+          - >
+            Set it by turning it up until the hiss just stops, then leaving it
+            there. If you are hunting for weak signals, turn squelch off
+            entirely - it is easier to sit through hiss than to wonder what you
+            are missing.
+        see: [nfm, noise-floor, snr, volume]
+
+      - slug: volume
+        title: Volume
+        summary: >
+          How loud the audio is - and the last thing in the chain, so it cannot
+          damage anything upstream.
+        where: The Audio section of the control column, at every level.
+        body:
+          - >
+            Volume is applied right at the end, after every filter,
+            [[audio-agc|gain rider]] and noise stage. That ordering matters: an
+            automatic gain control sitting behind a volume knob would spend its
+            range undoing it.
+          - >
+            If a station is too quiet even at full volume, the problem is
+            almost always further up - [[rf-gain]], the [[antenna]] or the
+            [[mode]] - not here.
+        see: [audio-agc, rf-gain, audio-device]
+
+      - slug: deemphasis
+        title: De-emphasis
+        summary: >
+          Undoes a deliberate treble boost that FM broadcasters apply before
+          transmitting.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            FM hiss lands mostly at the high frequencies, so broadcasters turn
+            the treble up before transmitting and the receiver turns it back
+            down afterwards. The music comes out flat and the hiss comes down
+            with the treble. It is a free improvement, and every FM radio ever
+            built does it.
+          - >
+            The catch is that the two ends have to agree on how much. The
+            Americas use 75 microseconds; most of the rest of the world uses
+            50. Get it wrong and the sound is slightly dull or slightly harsh -
+            not broken, just not right.
+          - >
+            Automatic picks from the [[band-plan|band plan]], which is almost
+            always what you want.
+        see: [wfm, audio-filter, band-plan]
+
+      - slug: stereo
+        title: FM stereo
+        summary: >
+          Two channels instead of one, decoded from a hidden extra signal
+          alongside the audio.
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            A stereo FM broadcast sends the two channels added together, so
+            mono radios still work, plus their difference on a separate carrier
+            further up. Add and subtract and you have left and right again.
+          - >
+            The difference channel sits where FM noise is worst - about 15 dB
+            worse than the sum. That is why a fringe station is noticeably
+            hissier in stereo than in mono, and why [[stereo-blend]] exists.
+          - >
+            The STEREO badge lights from what actually reached your sound card,
+            not from what was received. Switching on
+            [[audio-noise-reduction|audio noise reduction]] mixes the two
+            channels together, and the badge honestly goes out.
+        see: [stereo-blend, wfm, rds, audio-noise-reduction]
+
+      - slug: stereo-blend
+        title: Stereo blend
+        summary: >
+          Fades a weak station gently towards mono instead of leaving it
+          hissing in stereo.
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            [[stereo|Stereo]] costs about 15 dB of noise. On a strong station
+            that is free; on a fringe one it is the difference between pleasant
+            and unlistenable. Blend watches how strong the station's pilot tone
+            is and fades the stereo away as it weakens, so the sound gets
+            narrower rather than noisier.
+          - >
+            Fully blended is honestly reported as mono, and the STEREO badge
+            goes out - two identical channels are not stereo, whatever the
+            receiver managed to lock onto.
+          - >
+            On a strong station this does nothing at all, which is why it is on
+            by default.
+        see: [stereo, snr, noise-floor]
+
+      - slug: rds
+        title: RDS
+        summary: >
+          The station name and song title an FM broadcaster sends alongside its
+          audio.
+        also: [Radio Data System, radiotext, station name]
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            Above the audio on a broadcast FM signal, too high to hear, sits a
+            slow data channel. It carries the station's name, a scrolling line
+            of text - usually the song now playing - and an identification code
+            from which the callsign can often be worked out.
+          - >
+            It takes a few seconds to appear, and on a weak station it may
+            arrive wrong before it arrives right, so the app waits for two
+            identical copies before it will show a name.
+          - >
+            American stations often scroll song titles through the name field
+            rather than leaving their own name there, so the eight characters
+            you see may well be part of a track.
+        see: [wfm, stereo, hd-radio]
+
+  - name: Seeing the signal
+    articles:
+
+      - slug: spectrum
+        title: The spectrum
+        summary: >
+          A picture of how much signal there is at each frequency, right now.
+        body:
+          - >
+            Frequency runs left to right, strength runs bottom to top. A
+            station is a bump; the ragged line along the bottom is the
+            [[noise-floor|noise floor]]. The height of a bump above that line
+            is its [[snr|signal to noise ratio]], which is what decides whether
+            you can hear it.
+          - >
+            The shape says what it is. A broad flat block 150 kHz wide is
+            broadcast [[wfm|FM]]. A narrow spike a couple of kHz wide is a bare
+            carrier. Two humps either side of a gap is [[ssb|sideband]] or
+            digital.
+          - >
+            You can click anywhere on it to tune there, drag to pan, and scroll
+            to [[zoom]]. Zooming is purely a matter of display - the radio is
+            not retuned and nothing is thrown away.
+        see: [waterfall, decibel, snr, zoom, fft-size]
+
+      - slug: waterfall
+        title: The waterfall
+        summary: >
+          The spectrum over time - the same picture, scrolling, with strength
+          shown as colour.
+        body:
+          - >
+            Each row is one moment's [[spectrum]], with colour standing in for
+            height. New rows appear at the top and everything else moves down,
+            so a signal that comes and goes leaves a visible trace of when it
+            did.
+          - >
+            This is much better than the spectrum for spotting anything
+            intermittent. A two-way transmission that lasts three seconds is a
+            blink on the spectrum and an unmistakable dash on the waterfall.
+          - >
+            It uses exactly the same frequency scale as the spectrum above it,
+            so a mark on one lines up with a bump on the other.
+        see: [spectrum, colour-map, waterfall-speed, display-range]
+
+      - slug: decibel
+        title: Decibels
+        summary: >
+          The unit everything on this screen is measured in - a ratio, not an
+          amount.
+        also: [dB, dBFS]
+        body:
+          - >
+            Radio strengths cover a range so vast that ordinary numbers are
+            useless - the strongest thing you will hear is millions of times
+            the weakest. Decibels compress that into a readable scale. Every
+            10 dB is ten times the power. 20 dB is a hundred times, 30 dB is a
+            thousand.
+          - >
+            The rules of thumb worth carrying: 3 dB is twice the power and
+            barely audible. 10 dB is obvious. 20 dB is the difference between a
+            station you can just hear and one that sounds fine.
+          - >
+            Levels here are dBFS - decibels relative to the loudest thing the
+            dongle can digitise, so they are all negative and 0 dB means flat
+            out. A station at -30 dBFS is strong, one at -90 dBFS is near the
+            [[noise-floor|noise floor]].
+        see: [snr, noise-floor, display-range]
+
+      - slug: snr
+        title: Signal to noise ratio
+        summary: >
+          How far a signal stands above the background - the number that
+          actually predicts whether you can hear it.
+        also: [SNR, signal-to-noise, strength]
+        body:
+          - >
+            Raw strength on its own says very little. A signal at -60 dBFS is
+            perfectly clear in a quiet place and inaudible in a noisy one. What
+            matters is the gap between it and the [[noise-floor|noise floor]],
+            measured in [[decibel|decibels]].
+          - >
+            Roughly: under 6 dB is barely there, 10 dB is intelligible speech,
+            20 dB is comfortable, over 40 dB is a local broadcaster. The four
+            strength bars on a found signal are that scale.
+          - >
+            Turning the [[rf-gain]] up raises the signal and the noise
+            together, so it does not improve this. A better [[antenna]] does.
+        see: [noise-floor, decibel, rf-gain, sensitivity]
+
+      - slug: fft-size
+        title: Resolution
+        summary: >
+          How finely the spectrum is divided - detail against responsiveness.
+        also: [FFT size, bins]
+        where: The Display section of the control column, at Expert.
+        body:
+          - >
+            The [[spectrum]] is worked out by chopping the incoming samples
+            into blocks and transforming each one. A bigger block divides the
+            same window into more, finer slices, so two signals close together
+            show as two bumps rather than one.
+          - >
+            The cost is time. A bigger block covers a longer stretch of radio,
+            so the picture responds more slowly and brief events smear. It also
+            costs more work per frame.
+          - >
+            4096 is a good middle. Go up when you are trying to separate two
+            things that are nearly on top of each other; go down when you are
+            watching something that flickers.
+        see: [spectrum, fft-window, smoothing, waterfall-speed]
+
+      - slug: fft-window
+        title: Window function
+        summary: >
+          A shaping applied before each transform, to stop a strong signal
+          smearing across the whole picture.
+        also: [Hann, Blackman-Harris, flat top, taper]
+        where: The Display section of the control column, at Expert.
+        body:
+          - >
+            Chopping a continuous signal into blocks creates artificial edges,
+            and those edges spread false energy right across the
+            [[spectrum]] - a strong station appears to have skirts reaching far
+            wider than it really does. A window fades each block in and out to
+            soften them.
+          - >
+            Hann is the sensible default. Blackman-Harris suppresses the
+            smearing harder, at the cost of making everything slightly
+            broader - use it when a strong station is drowning a weak
+            neighbour. Flat top measures amplitudes most accurately and is the
+            worst at separating things. None (rectangular) does no shaping at
+            all and is mostly there to show you why the others exist.
+          - >
+            This is a different thing entirely from [[sample-rate|the window]]
+            in the Radio section, which is how wide a slice of dial the dongle
+            captures.
+        see: [fft-size, spectrum, smoothing, sample-rate]
+
+      - slug: smoothing
+        title: Smoothing
+        summary: >
+          Averages the spectrum over time so the trace stops jittering.
+        where: The Display section of the control column, at Expert.
+        body:
+          - >
+            An unsmoothed [[spectrum]] flickers, because
+            [[noise-floor|noise]] is different every frame. Smoothing blends
+            each new frame with what was already there, which steadies the
+            noise and makes weak signals stand out from it.
+          - >
+            The cost is lag: a signal that appears takes a moment to reach full
+            height, and one that vanishes fades rather than dropping. Too much
+            and short transmissions are smeared into nothing.
+        see: [fft-size, peak-hold, spectrum]
+
+      - slug: peak-hold
+        title: Peak hold
+        summary: >
+          Keeps the highest level seen at each frequency, drawn as a second
+          faint line.
+        where: The Display section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            The live trace only shows this instant, so an intermittent signal
+            is easy to miss entirely. Peak hold remembers the highest each
+            frequency has reached and leaves that line behind, so a
+            transmission that lasted half a second is still visible a minute
+            later.
+          - >
+            It is the fastest way to see what a band actually contains - leave
+            it running for a minute and the busy channels draw themselves.
+        see: [spectrum, waterfall, smoothing]
+
+      - slug: colour-map
+        title: Colours
+        summary: >
+          Which colours the waterfall uses for weak and strong.
+        also: [colormap, palette]
+        where: The Display section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            Purely a display preference - it changes nothing about what is
+            received. Some maps make weak signals easier to see, others make
+            strong ones easier to compare. It is worth trying them on a band
+            you know before deciding.
+          - >
+            If the [[waterfall]] looks entirely flat, the problem is more
+            likely the [[display-range|floor and ceiling]] than the colours.
+        see: [waterfall, display-range]
+
+      - slug: display-range
+        title: Floor and ceiling
+        summary: >
+          Which range of strengths the colours are spread across.
+        also: [contrast, range, floor, ceiling]
+        where: The Display section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            The floor is the level painted as background, the ceiling the level
+            painted as full brightness. Everything between is spread across the
+            [[colour-map|colours]].
+          - >
+            Set the floor a few [[decibel|dB]] below your
+            [[noise-floor|noise floor]] and the ceiling just above your
+            strongest station, and the picture uses its whole range. Set them
+            too far apart and everything is a uniform murk; too close together
+            and everything is saturated.
+          - >
+            Fit to signal does this for you from what is currently on screen,
+            which is usually the quickest way to a readable display.
+        see: [colour-map, waterfall, decibel, noise-floor]
+
+      - slug: waterfall-speed
+        title: Waterfall speed
+        summary: >
+          How fast the waterfall scrolls.
+        where: The Display section of the control column, at Expert.
+        body:
+          - >
+            Faster shows more detail in time and holds less history on screen;
+            slower shows more of the last few minutes at once. If you are
+            watching for brief two-way transmissions, faster. If you are
+            surveying what a band does over time, slower.
+        see: [waterfall, spectrum]
+
+      - slug: zoom
+        title: Zoom
+        summary: >
+          Magnifies part of the captured window - a display change only, with
+          no effect on the radio.
+        where: The Display section of the control column, at every level, or
+          the scroll wheel on the spectrum.
+        body:
+          - >
+            The dongle captures a wide window at once - normally 2.4 MHz - and
+            the panes show all of it. Zooming shows less of it, larger. No
+            device setting changes, so this is instant and cannot go wrong.
+          - >
+            Drag either pane to pan, and click anywhere to tune there. Zoom is
+            a standing preference and survives retuning; the pan re-centres
+            when you retune, because an offset that survived would leave you
+            looking several channels away from the station you just asked for.
+          - >
+            To capture a genuinely wider or narrower slice of dial, that is
+            [[sample-rate|the window]], not zoom.
+        see: [spectrum, waterfall, sample-rate]
+
+      - slug: split
+        title: Split
+        summary: >
+          How the height is divided between the spectrum and the waterfall.
+        where: The Display section of the control column, at Expert.
+        body:
+          - >
+            Purely layout. More [[spectrum]] when you are measuring something,
+            more [[waterfall]] when you are watching for activity. You can also
+            drag the divider between the two panes.
+        see: [spectrum, waterfall]
+
+  - name: The receiver
+    articles:
+
+      - slug: rf-gain
+        title: RF gain
+        summary: >
+          How much the dongle amplifies before digitising - and the control
+          most often set wrongly.
+        also: [gain, tuner gain]
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            Too little gain and weak signals never rise above the dongle's own
+            digitising noise. Too much and the strongest station in the window
+            overloads the front end, at which point it manufactures false
+            signals that appear all over the band and were never on the air.
+          - >
+            Turning gain up does not improve the [[snr|signal to noise
+            ratio]] - it raises the signal and the noise equally. Past the
+            point where the noise is comfortably above the digitiser, more gain
+            buys nothing and eventually costs a great deal.
+          - >
+            The app measures a setting for you whenever the front end is
+            pointed at something materially different - a new [[band|band]], a new
+            [[sample-rate|window]], a signal picked from Discover - because the
+            right answer varies enormously. Locally, broadcast FM wants about
+            20 to 33 dB; [[adsb|aircraft on 1090 MHz]] want nearly 50.
+          - >
+            If the status line says the front end is overloaded, lower the gain
+            or use a shorter [[antenna]]. That message is measured, not
+            guessed.
+        see: [antenna, snr, tuner-agc, noise-floor]
+
+      - slug: tuner-agc
+        title: Tuner AGC
+        summary: >
+          Lets the dongle choose its own RF gain, moment to moment.
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            The tuner chip can ride its own [[rf-gain]], turning it down when a
+            strong signal arrives. It sounds like the safe option and usually
+            is not: it reacts to the strongest thing anywhere in the window, so
+            a powerful station 2 MHz away quietly turns down the weak one you
+            actually wanted.
+          - >
+            A fixed, measured gain is more predictable, which is why the app
+            measures one for you rather than leaving this on.
+        see: [rf-gain, digital-agc, sample-rate]
+
+      - slug: digital-agc
+        title: Digital AGC
+        summary: >
+          A second automatic gain stage, after the digitiser rather than before
+          it.
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            This one adjusts the numbers rather than the amplifier. It cannot
+            rescue a signal that was already too weak to digitise properly, and
+            it cannot cause the overload that [[tuner-agc]] can. Mostly it is
+            harmless and occasionally useful on signals whose strength varies
+            wildly.
+        see: [tuner-agc, rf-gain, audio-agc]
+
+      - slug: sample-rate
+        title: Window
+        summary: >
+          How wide a slice of dial the dongle captures at once - a correctness
+          setting, not a display preference.
+        also: [sample rate, MS/s, capture width]
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            The dongle digitises a whole window centred on where you are tuned
+            - normally 2.4 MHz of it. Everything the app can show or scan has
+            to be inside that window, so a wider one sees more at once.
+          - >
+            Wider is not always better, and the AM broadcast band is the proof.
+            This dongle converts the AM band upwards internally, and that
+            conversion leaks a strong tone at the middle of the window. On a
+            2.4 MHz window that leak sits inside the picture, 65 dB above the
+            noise, and the automatic [[rf-gain]] turns everything down to
+            accommodate it - taking the station you wanted with it. Narrowing
+            to 240 kHz puts the leak outside the window entirely and is worth
+            about 35 dB of audio.
+          - >
+            So the app narrows the window automatically where a band needs it.
+            It only ever narrows, and it never widens against your wishes.
+          - >
+            To magnify what is already captured, use [[zoom]] instead - it
+            costs nothing and changes no device setting.
+        see: [zoom, rf-gain, spectrum, offset-tuning, fft-window]
+
+      - slug: ppm
+        title: Frequency correction
+        summary: >
+          Compensates for the dongle's clock being slightly off, so stations
+          land where the dial says.
+        also: [ppm, parts per million, calibration]
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            Every receiver's clock is slightly wrong, and the error scales with
+            [[frequency]]: one part per million is 1 Hz at 1 MHz and 1,000 Hz
+            at 1 GHz. Left uncorrected, a station appears slightly off its
+            published frequency - harmless on [[wfm|wide FM]], fatal on
+            [[ssb|sideband]] where a few hundred hertz makes a voice
+            unintelligible.
+          - >
+            The calibration assistant measures it for you against a known
+            steady carrier. Give it weather radio or an AM broadcast station,
+            not an FM music station - a wideband FM signal's peak wanders with
+            the programme and gives a different answer every time. The
+            assistant will refuse to answer rather than return a number it does
+            not trust.
+          - >
+            The V4's temperature-compensated crystal is good, so expect a very
+            small number here. This control matters far more on older dongles
+            and clones.
+        see: [ssb, frequency, sdr]
+
+      - slug: bias-tee
+        title: Bias tee
+        summary: >
+          Sends 4.5 volts up the antenna cable to power an amplifier at the far
+          end.
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            Some antennas have a small amplifier built into them, mounted at
+            the antenna rather than at the radio, and it has to be fed power
+            somehow. The bias tee puts DC on the same cable that carries the
+            signal.
+          - >
+            Leave it off unless you know you have such an antenna. Feeding
+            voltage into equipment that does not expect it is one of the few
+            things in this app that can damage hardware, which is why it asks
+            first and why it is never restored automatically when the app
+            reopens.
+        see: [antenna, rf-gain]
+
+      - slug: offset-tuning
+        title: Offset tuning
+        summary: >
+          Parks the tuner slightly to one side, so its own dead spot is not on
+          top of your station.
+        where: The Receiver correction section of the control column, at
+          Expert.
+        body:
+          - >
+            The dongle has a small artefact at the exact centre of its window -
+            a spike that is not on the air. Sitting a real station underneath
+            it is unfortunate. Offset tuning moves the tuner a little to one
+            side and shifts the picture back in software, so the station sits
+            clear of it.
+          - >
+            The cost is that the dead spot lands somewhere else instead, and
+            the usable edges of the window shrink slightly. It is worth it when
+            the artefact is in your way and not otherwise.
+        see: [sample-rate, dc-removal, spectrum]
+
+      - slug: dc-removal
+        title: DC removal
+        summary: >
+          Takes out the artificial spike at the middle of the window.
+        where: The Receiver correction section of the control column, at
+          Expert.
+        body:
+          - >
+            The dongle's own electronics put a small constant offset into the
+            samples, which appears as a spike at the exact centre of the
+            [[spectrum]] whatever you are tuned to. It is not on the air.
+            Removing it makes the picture honest.
+          - >
+            [[offset-tuning|Offset tuning]] is the other approach to the same
+            problem: this one erases the spike, that one moves your station
+            away from it.
+        see: [offset-tuning, iq-imbalance, spectrum]
+
+      - slug: iq-imbalance
+        title: IQ imbalance
+        summary: >
+          Corrects a small manufacturing mismatch that makes faint mirror
+          images of strong signals.
+        also: [quadrature imbalance, image rejection]
+        where: The Receiver correction section of the control column, at
+          Expert.
+        body:
+          - >
+            A dongle measures the signal twice at once, a quarter cycle apart -
+            see [[iq]]. If the two paths are not perfectly matched, every
+            strong station leaves a faint mirror of itself the same distance
+            the other side of the centre. Correcting the mismatch makes those
+            mirrors go away.
+          - >
+            This particular dongle barely needs it - measured at 0.07 degrees
+            and 0.02 dB, which is very good. The correction is here for
+            recordings and other hardware.
+        see: [iq, dc-removal, swap-iq]
+
+      - slug: swap-iq
+        title: Swap I/Q
+        summary: >
+          Flips the spectrum left to right - for recordings or hardware that
+          arrive mirrored.
+        where: The Receiver correction section of the control column, at
+          Expert.
+        body:
+          - >
+            Exchanging the two halves of an [[iq|IQ]] sample mirrors the
+            [[spectrum]] about its centre. Some hardware and some recordings
+            come out that way round, and everything then tunes backwards. This
+            puts it right. On this dongle, leave it off.
+        see: [iq, iq-imbalance, spectrum]
+
+      - slug: iq
+        title: IQ samples
+        summary: >
+          The two-number-per-sample form every signal takes inside a software
+          radio.
+        also: [I/Q, complex samples, baseband]
+        body:
+          - >
+            Measuring a wave once tells you how big it is but not which way it
+            is going. Measuring it twice, a quarter of a cycle apart, tells you
+            both - so the receiver can tell a signal above the centre frequency
+            from one the same distance below it. Those two numbers are called I
+            and Q.
+          - >
+            Everything downstream works on them: the [[spectrum]], every
+            [[mode|demodulator]], every decoder. This dongle produces 2.4
+            million pairs a second, each one byte, which is why an
+            [[iq-recording|IQ recording]] is 4.8 MB per second.
+        see: [sdr, iq-recording, iq-imbalance, sample-rate]
+
+      - slug: audio-device
+        title: Sound output
+        summary: >
+          Which sound card or headphones the audio goes to.
+        also: [output, speakers, sound card]
+        where: The Audio section of the control column, from Standard upwards.
+        body:
+          - >
+            Nothing to do with the radio - just where the finished audio is
+            sent. If you can see a signal on the [[spectrum]] and the meter
+            moves but you hear nothing, this is the first thing to check.
+        see: [volume, audio-recording]
+
+  - name: Cleaning up the sound
+    articles:
+
+      - slug: audio-agc
+        title: Automatic gain control
+        summary: >
+          Rides the volume automatically, so a quiet station and a loud one
+          arrive at the same level.
+        also: [AGC]
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Broadcasters vary enormously in level, and a single transmission
+            varies within itself. An AGC turns quiet passages up and loud ones
+            down, so you are not reaching for the [[volume]] every few minutes.
+          - >
+            It sits before the volume control and before the final limiter,
+            deliberately: an AGC behind a volume knob would spend its range
+            undoing it, and one behind a limiter cannot recover what the
+            limiter already flattened.
+          - >
+            Its behaviour is set by [[agc-threshold]], [[agc-decay]],
+            [[agc-slope]] and [[agc-hang]].
+        see: [agc-threshold, agc-decay, agc-slope, agc-hang, volume]
+
+      - slug: agc-threshold
+        title: AGC threshold
+        summary: >
+          The level above which the gain rider starts working.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Below the threshold the audio is left alone; above it, the
+            [[audio-agc|AGC]] pulls it back. Set it low and nearly everything
+            is levelled, including the hiss between transmissions, which then
+            swells up unpleasantly. Set it high and only the loudest passages
+            are touched.
+          - >
+            This is a different control from the [[squelch]] threshold, which
+            decides whether you hear anything at all.
+        see: [audio-agc, agc-slope, squelch]
+
+      - slug: agc-decay
+        title: AGC decay
+        summary: >
+          How quickly the gain rider turns back up after a loud passage.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Too fast and the hiss surges up in every gap between words, an
+            effect usually described as pumping. Too slow and the quiet line
+            after a shout stays inaudible. A few hundred milliseconds to a
+            second suits speech.
+        see: [audio-agc, agc-hang, agc-threshold]
+
+      - slug: agc-slope
+        title: AGC slope
+        summary: >
+          How hard the gain rider pushes back once it is working.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            A gentle slope levels loud and quiet only partly, keeping some of
+            the natural dynamics. A steep one makes everything the same
+            loudness, which is easier to listen to on a noisy channel and
+            flatter on music.
+        see: [audio-agc, agc-threshold]
+
+      - slug: agc-hang
+        title: AGC hang
+        summary: >
+          Holds the gain steady through short gaps instead of reacting to them.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Speech is full of tiny silences, and an [[audio-agc|AGC]] that
+            turned up during each one would breathe audibly. Hang makes it wait
+            a moment before it starts recovering, so pauses between words stay
+            quiet.
+        see: [audio-agc, agc-decay]
+
+      - slug: noise-blanker
+        title: Noise blanker
+        summary: >
+          Removes sharp repetitive clicks - car ignitions, electric fences,
+          some power supplies.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Impulse noise is very short and very strong. The blanker spots
+            samples far above the recent average and pulls them down to it,
+            which removes the click almost entirely because there was almost no
+            wanted signal underneath it.
+          - >
+            It detects at one level and suppresses to another, which matters:
+            clipping an impulse back to the level that detected it would leave
+            it several times louder than everything around it.
+          - >
+            It does nothing for steady hiss - that is [[if-noise-reduction]]
+            and [[audio-noise-reduction]].
+        see: [if-noise-reduction, audio-noise-reduction, noise-floor]
+
+      - slug: if-noise-reduction
+        title: IF noise reduction
+        summary: >
+          Reduces hiss before the signal is demodulated, where it can do most
+          good.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Noise removed before demodulation never gets a chance to become
+            audible noise, so this can be more effective than cleaning up
+            afterwards. It works after the channel filter rather than on the
+            whole window - noise outside the channel is about to be thrown away
+            anyway, and doing it on the full 2.4 MHz stream would cost ten
+            times as much processing.
+          - >
+            Pushed hard it makes signals sound hollow and watery. A little is
+            usually worth more than a lot.
+        see: [audio-noise-reduction, noise-blanker, bandwidth]
+
+      - slug: audio-noise-reduction
+        title: Audio noise reduction
+        summary: >
+          Reduces hiss in the finished audio, after demodulation.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            It estimates what the steady background sounds like and subtracts
+            it. That works well on hiss and badly on anything genuinely
+            steady - it will remove a continuous tone, because a continuous
+            tone is indistinguishable from a noise floor. Do not use it on
+            [[cw|Morse]].
+          - >
+            It mixes [[stereo]] down to mono, because two independent noise
+            estimates pull the stereo image apart. The STEREO badge goes out
+            when it does, rather than staying lit over audio that is no longer
+            stereo.
+        see: [if-noise-reduction, noise-blanker, stereo, cw]
+
+      - slug: audio-filter
+        title: Audio filter
+        summary: >
+          Trims the very low and very high ends of the audio, where there is
+          more noise than programme.
+        where: The Processing section of the control column, at Expert.
+        body:
+          - >
+            Rumble below the voice and hiss above it carry almost no useful
+            content, and cutting them makes speech noticeably clearer without
+            touching the speech itself. On music it is worth turning off.
+        see: [bandwidth, audio-noise-reduction, deemphasis]
+
+      - slug: filter-edge
+        title: Filter edge
+        summary: >
+          How sharply the channel filter cuts off at the edge of the bandwidth.
+        where: The Radio section of the control column, at Expert.
+        body:
+          - >
+            A sharper edge rejects the neighbouring channel more completely. It
+            costs processing, and a very sharp filter rings slightly on sharp
+            sounds. A gentler edge is cheaper and kinder to the audio, and lets
+            a little more of the neighbour through.
+          - >
+            It matters most where channels are packed tightly together and on
+            [[cw|Morse]], where the filter is doing nearly all the work.
+        see: [bandwidth, cw, ssb]
+
+  - name: Finding things
+    articles:
+
+      - slug: scanning
+        title: Scanning
+        summary: >
+          Sweeping a whole band and listing everything transmitting in it.
+        also: [sweep, scan, Discover]
+        where: The Discover screen, at every level.
+        body:
+          - >
+            The dongle can only see about 2.4 MHz at a time, so covering a
+            20 MHz [[band|band]] means retuning across it in steps and stitching the
+            results together. The app does that three times over and only
+            reports what turned up in more than one pass, which is what
+            separates a real station from a noise peak that happened to be tall
+            once.
+          - >
+            Nothing appears until the second pass finishes, so the list arrives
+            about two thirds of the way through. Broadcast FM takes about five
+            seconds.
+          - >
+            Audio stops while a sweep runs. The scan and the listening share
+            one sample stream, and two things draining it would each get half
+            the samples.
+        see: [sensitivity, classification, band-plan, sort-order]
+
+      - slug: sensitivity
+        title: Sensitivity
+        summary: >
+          How far above the noise something has to be before the app counts it
+          as a signal.
+        where: The Discover screen, from Standard upwards.
+        body:
+          - >
+            Strong signals only reports the obvious ones and little else.
+            Include weak signals reports far more, some of which will be
+            [[noise-floor|noise]] peaks and interference rather than stations.
+          - >
+            There is no correct setting - it is a choice about which mistake
+            you would rather make. Missing something real and reporting
+            something that is not there are both errors, and this control
+            decides which way to lean.
+          - >
+            If a scan returns an overwhelming list, the type chips are usually
+            a better answer than reducing sensitivity: they put a whole kind
+            out of sight while still telling you how many they are holding
+            back.
+        see: [scanning, snr, classification, unmodulated-carrier]
+
+      - slug: classification
+        title: How the app names a signal
+        summary: >
+          Where it is, how wide it is and what shape it is - three questions,
+          asked in that order.
+        also: [classifier, what is this]
+        body:
+          - >
+            The [[band-plan|band plan]] answers the first: a 150 kHz signal at
+            94.9 MHz is in the broadcast FM band, and the band tells you what
+            is allowed to be there. Its measured width answers the second. Its
+            shape - flat-topped, spiky, two humps, a bare spike - answers the
+            third.
+          - >
+            The reasoning is deliberately rule-based rather than learned from
+            examples, and it is spelled out on every card, because being able
+            to say why is the point. "Constant power, 150 kHz wide, sits in the
+            88 to 108 MHz broadcast band" is something you can check and argue
+            with.
+          - >
+            Unknown signal and [[unmodulated-carrier|Unmodulated carrier]] are
+            proper answers, not failures. A confident wrong answer would cost
+            you trust in every other line on the screen.
+        see: [band-plan, best-guess, unmodulated-carrier, scanning]
+
+      - slug: band-plan
+        title: The band plan
+        summary: >
+          The app's prior knowledge of what lives where on the dial.
+        body:
+          - >
+            It is a list of [[band|bands]] with their frequencies, their usual
+            [[mode]], their usual [[bandwidth]] and a description in plain
+            English, plus named [[channel|channels]] inside them and a second
+            list saying what the stretches between the bands are licensed for.
+          - >
+            Three parts of the app read it. The coloured ribbon above the
+            [[spectrum]] labels the picture from it, tuning into a new band
+            takes that band's mode and bandwidth from it, and the
+            [[classification|classifier]] uses it to turn a measurement into a
+            name.
+          - >
+            It is a data file, so a different country is a different file
+            rather than different code.
+        see: [band, channel, classification, mode]
+
+      - slug: channel
+        title: Channels
+        summary: >
+          Named, numbered frequencies inside a band - "Channel 16", "WX1".
+        body:
+          - >
+            Many bands are divided into numbered channels rather than being
+            tuned freely, and the number is what people actually say out loud.
+            The app knows the names and shows them.
+          - >
+            Every channel has two names and both are worth having. The friendly
+            one - "Channel 16" - is what somebody on a boat says. The official
+            one - "International Distress, Safety and Calling" - is what the
+            rule book and the chart say, and it is the phrase to search for.
+            The friendly name shows at every level, the official one from
+            Standard upwards.
+        see: [band-plan, band, frequency]
+
+      - slug: unmodulated-carrier
+        title: Unmodulated carrier
+        summary: >
+          A steady signal carrying nothing - usually electrical noise from
+          something nearby.
+        also: [carrier, interference, spur]
+        body:
+          - >
+            A bare carrier is a signal with no [[modulation]] on it: real radio
+            energy with nothing to listen to. Indoors they are everywhere.
+            Switching power supplies, LED lighting, computers and the dongle's
+            own clock all radiate narrow steady spikes, and an indoor aerial on
+            the airband typically finds dozens of them.
+          - >
+            The app reports them because they are real, and names them honestly
+            rather than guessing at a station. If they are cluttering a list,
+            the type chip hides the whole kind in one click and keeps saying
+            how many it is holding back.
+          - >
+            One important exception: on the [[am|AM broadcast band]] a
+            transmitter radiates its carrier continuously and only the
+            sidebands follow the programme, so a steady carrier there is an
+            ordinary station between words. The same picture means opposite
+            things in different bands, and only the band can tell them apart.
+        see: [classification, noise-floor, am, sensitivity]
+
+      - slug: best-guess
+        title: Best guess
+        summary: >
+          A badge meaning the app has named this signal but is not confident.
+        body:
+          - >
+            Some signals fit their band's expectations only partly - the right
+            place but the wrong width, or the right width and an odd shape.
+            Rather than either suppressing the answer or stating it flatly, the
+            card carries a BEST GUESS badge and still lists its reasoning.
+          - >
+            Open the reasoning and decide for yourself. That is not a debugging
+            aid; being able to disagree with the app is how you learn what it
+            is measuring.
+        see: [classification, unmodulated-carrier]
+
+      - slug: sort-order
+        title: Order
+        summary: >
+          What goes at the top of the found list. Sorting changes nothing about
+          what was found.
+        where: The Discover screen, from Standard upwards.
+        body:
+          - >
+            Strongest first is the right default when you do not yet know what
+            you are looking for - it is how a Wi-Fi picker orders networks. By
+            frequency reads like a dial. Grouped by type puts each kind
+            together, with the kinds ordered by their strongest member so real
+            stations are not buried under whatever happens to be most numerous.
+        see: [scanning, classification]
+
+  - name: Decoding
+    articles:
+
+      - slug: hd-radio
+        title: HD Radio
+        summary: >
+          A digital signal many FM stations transmit alongside their ordinary
+          one, often with extra programmes on it.
+        also: [IBOC, NRSC-5, HD]
+        where: The Audio section of the control column, at every level.
+        body:
+          - >
+            An HD station transmits its ordinary analogue broadcast with
+            digital sidebands either side of it, about 15 dB quieter. Decoded,
+            they give cleaner audio than the analogue signal and frequently
+            carry [[hd-program|extra programmes]] that exist nowhere else on
+            the dial.
+          - >
+            It takes three to five seconds to lock on before the first sound
+            arrives - that is the decoder finding the digital frame, not the
+            app being slow - so the audio is held quiet rather than played
+            over. If a station carries no HD, the app gives up after twelve
+            seconds and hands you the analogue broadcast back.
+          - >
+            You can see it on the [[spectrum]]: a flat shelf either side of the
+            station, starting about 130 kHz out and ending about 200 kHz out.
+        see: [hd-program, wfm, rds, spectrum]
+
+      - slug: hd-program
+        title: HD subchannels
+        summary: >
+          The extra programmes an HD Radio station carries - HD2, HD3 and so
+          on.
+        where: The Audio section of the control column, at every level.
+        body:
+          - >
+            HD1 is normally the same programme as the analogue broadcast. HD2
+            and above are separate stations that exist only in the
+            [[hd-radio|digital signal]] - a jazz service, a second talk
+            channel, a different format entirely.
+          - >
+            Switching between them restarts the decoder, so it costs the
+            three-to-five second lock again. Not every HD station carries more
+            than one; the list shows what the station itself announces.
+        see: [hd-radio]
+
+      - slug: adsb
+        title: ADS-B
+        summary: >
+          Aircraft broadcasting their own position, altitude and callsign on
+          1090 MHz.
+        also: [Mode S, 1090, aircraft tracking, planes]
+        where: The Aircraft screen, at every level.
+        body:
+          - >
+            Aircraft transmit short bursts several times a second saying who
+            they are, where they are, how high and how fast. There is no
+            subscription and no service involved - your dongle simply hears
+            them, the same way it hears a radio station.
+          - >
+            Range is line of sight, so it depends enormously on how high and
+            how clear your [[antenna]] is. Indoors on the supplied aerial you
+            will typically hear a handful of aircraft; a window helps a great
+            deal.
+          - >
+            1090 MHz wants far more [[rf-gain]] than the FM band - nearly 50 dB
+            against 20 to 33 - which is a good illustration of why gain belongs
+            to the band rather than to the session.
+          - >
+            The aircraft screen borrows the radio while it is open, and gives
+            it back exactly as it found it when you leave.
+        see: [antenna, rf-gain, band]
+
+      - slug: pocsag
+        title: POCSAG
+        summary: >
+          Pager messages, still in daily use by hospitals and emergency
+          services.
+        also: [pager, paging, capcode]
+        where: The Radio section of the control column, from Standard upwards.
+        body:
+          - >
+            Pagers are far from dead - hospitals, fire services and utilities
+            still use them, because a pager works where a phone does not. The
+            messages are sent in clear on ordinary [[nfm|narrow FM]] channels,
+            most commonly between 929 and 932 MHz.
+          - >
+            Each message carries a capcode - the number identifying the pager
+            it is for - and either numeric or text content. The app listens at
+            all three standard speeds at once rather than trying to detect
+            which is in use, because the transmission you most want is the one
+            you tuned into halfway through.
+          - >
+            It only attaches on channels narrow enough to be paging channels in
+            the first place, so it costs nothing on a broadcast station.
+        see: [nfm, bandwidth, band]
+
+  - name: Recording and saving
+    articles:
+
+      - slug: audio-recording
+        title: Recording audio
+        summary: >
+          Saves what you are hearing as a WAV file.
+        where: The Recording section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            Ordinary 16-bit mono WAV at 48 kHz, which anything will play. Files
+            land in a BetterSDR Recordings folder in your home directory.
+          - >
+            This is the finished audio - after every filter and correction - so
+            it is what you heard, not what arrived at the antenna. For that,
+            see [[iq-recording]].
+        see: [iq-recording, audio-device, volume]
+
+      - slug: iq-recording
+        title: Recording IQ
+        summary: >
+          Saves the raw radio, so a whole slice of dial can be replayed and
+          re-tuned later.
+        where: The Recording section of the control column, at Expert.
+        body:
+          - >
+            An [[iq|IQ]] recording captures the entire window, untouched, so
+            afterwards you can tune anywhere inside it, change [[mode]], change
+            [[bandwidth]] and hear something you were not even listening to at
+            the time. SDR#, HDSDR and GNU Radio all read the format back.
+          - >
+            It is written straight from the incoming samples, ahead of every
+            correction, because a capture is meant to be replayable through
+            software that does not exist yet.
+          - >
+            It is big: 4.8 MB every second, 17 GB an hour. The app enforces a
+            size limit and checks free space before starting.
+        see: [iq, audio-recording, sample-rate]
+
+      - slug: bookmarks
+        title: Saved frequencies
+        summary: >
+          Your own list of frequencies, with the mode and bandwidth they need.
+        also: [bookmarks, my list]
+        where: The Saved frequencies section of the control column, from
+          Standard upwards.
+        body:
+          - >
+            A saved frequency remembers how to listen to it, not just where it
+            is, so recalling one later simply works. Saving a signal straight
+            from a Discover card keeps the [[mode]] and [[bandwidth]] the
+            [[classification|classifier]] chose.
+          - >
+            The list can be grouped, and exported as a CSV file to share or
+            back up.
+        see: [favourites, recently-played, classification]
+
+      - slug: favourites
+        title: Favourites
+        summary: >
+          The handful of saved frequencies you actually come back to.
+        where: The Saved frequencies section of the control column, from
+          Standard upwards.
+        body:
+          - >
+            A star on a [[bookmarks|saved frequency]]. Once a list has fifty
+            entries, the difference between "I saved this once" and "this is
+            one of my stations" is worth marking.
+        see: [bookmarks, recently-played]
+
+      - slug: recently-played
+        title: Recently played
+        summary: >
+          Stations you actually listened to, as opposed to tuned past.
+        also: [history, back]
+        where: The Recently played section of the control column, at every
+          level.
+        body:
+          - >
+            A frequency only counts once you have stayed on it a few seconds.
+            Tuning by keystroke emits a frequency per key and clicking the
+            [[spectrum]] emits one per click, and a list of those would be
+            noise rather than history.
+          - >
+            The wait is also long enough for [[rds|RDS]] or
+            [[hd-radio|HD Radio]] to name the station, so entries arrive with
+            names on them rather than as bare numbers.
+          - >
+            Time is accrued only while the listening screen is showing. A
+            station left playing behind the Discover screen accrues nothing,
+            which is the honest reading of "played".
+        see: [bookmarks, favourites, rds]

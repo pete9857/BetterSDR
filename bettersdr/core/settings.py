@@ -98,6 +98,15 @@ DEFAULTS: dict[str, Any] = {
     # equipment plugged in by someone who never turned it on themselves.
     "bias_tee": False,
     "recording_dir": None,
+    # How the Discover list is ordered, and which kinds of signal it is
+    # holding back. Both are remembered because both are standing
+    # preferences: somebody who hid the eighty-three unmodulated carriers in
+    # the airband wants them hidden the next time they scan it, not just for
+    # the rest of this sitting. Nothing is ever hidden by default - the chip
+    # keeps saying how many it holds, so a restored filter cannot look like a
+    # sweep that missed something.
+    "scan_sort": "strength",
+    "hidden_kinds": [],
 }
 
 

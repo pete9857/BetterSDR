@@ -16,8 +16,11 @@ that has broken rather than one being quiet.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Signal as QtSignal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -50,10 +53,12 @@ from ..dsp.features import detect_hd_radio
 from ..dsp.psd import WINDOWS
 from ..scan import bandplan
 from ..scan.classifier import Signal
+from . import results
 from .freq_manager import FrequencyManager
 from .levels import Level
-from .widgets import colormaps
+from .widgets import colormaps, viewspan
 from .widgets.frequency import FrequencyDisplay
+from .widgets.icons import glyph
 from .widgets.meter import SignalMeter
 from .widgets.pagerlog import PagerLog
 from .widgets.panel import ControlPanel
@@ -69,6 +74,10 @@ SLOW_TICK = REFRESH_HZ
 # How many recently played stations the panel offers. The history keeps more;
 # a drop-down longer than this is a list to search rather than a shortcut.
 RECENT_SHOWN = 12
+
+# Both step buttons are this wide, whatever their label, so that the readout
+# between them stays centred in the window.
+STEP_BUTTON_WIDTH = 108
 
 FFT_SIZES = (512, 1024, 2048, 4096, 8192, 16384, 32768)
 WINDOW_LABELS = {
@@ -100,7 +109,47 @@ QLabel#stereoBadge {
     color: #0b0e13; background: #7ee081; border-radius: 3px;
     padding: 1px 6px; font-weight: 600;
 }
+QPushButton#stepButton {
+    background: #10151c; color: #cbd5e0;
+    border: 1px solid #2b323b; border-radius: 4px;
+    padding: 8px 6px; font-size: 12px;
+}
+QPushButton#stepButton:hover { border-color: #5ad1ff; color: #e6edf3; }
+QPushButton#stepButton:disabled { color: #3d4650; border-color: #1a2028; }
 """
+
+
+def band_headline(hz: float, level: Level) -> tuple[str, str]:
+    """What the header says about a frequency: the band, and the prose.
+
+    A plain function, like the colour maps and the digit arithmetic, because
+    the interesting part is the wording and the level gating rather than the
+    labels it ends up in.
+
+    The names themselves - "Channel 16", "Television 7 to 13" - are drawn on
+    the ribbon, over the piece of spectrum they describe, where they say
+    something a line of text cannot: how wide the channel is and where its
+    edges fall. What is left up here is the half that has nowhere else to go,
+    which is the explanation. From Standard upwards that also carries the
+    regulator's own phrase for the channel, the one somebody would search for
+    or find printed on a chart.
+    """
+    band = bandplan.find(hz)
+    if band is None:
+        # At Simple, a stretch of dial with nothing to listen to is better
+        # left quiet than explained: "licensed to mobile phone networks" is a
+        # true answer to a question a beginner did not ask.
+        allocation = bandplan.official(hz) if level >= Level.STANDARD else None
+        if allocation is None:
+            return "Unallocated", "Nothing is normally broadcast here."
+        return "Unallocated", allocation.use
+    channel = band.channel(hz)
+    if channel is None:
+        return band.name, band.description
+    info = channel.use
+    if channel.official and level >= Level.STANDARD:
+        info = f"{info} Officially: {channel.official}."
+    return band.name, info
 
 
 def _spin(
@@ -131,6 +180,12 @@ def _button(text: str, checkable: bool = False) -> QPushButton:
 
 class ListenView(QWidget):
     """Tune, listen, and watch the band."""
+
+    # Somebody clicked the name of a control wanting to know what it means.
+    # Passed straight up from the panel and out again without being acted on:
+    # this view has no idea the Learn screen exists, the same as it has no
+    # idea the Discover screen does.
+    helpRequested = QtSignal(str)
 
     def __init__(
         self,
@@ -172,6 +227,17 @@ class ListenView(QWidget):
         # used would be unusable.
         self._hd_programs: tuple[HdProgram, ...] = ()
         self._hd_labels: list[str] = []
+        # What the Discover screen is showing, handed over by the window. The
+        # step buttons walk this and nothing else: they are a way of moving
+        # through the list the user was just looking at, so they must skip
+        # what that list is hiding and follow the order it is in.
+        self._results: tuple[Signal, ...] = ()
+        # How much of the captured window the three panes are showing, and
+        # which frequency they were showing it around. One copy, here,
+        # because the spectrum, the waterfall and the ribbon have to agree on
+        # it exactly and none of them knows the others exist.
+        self._view = viewspan.FULL
+        self._view_center_hz = 0.0
 
         self._build()
         self._restore()
@@ -189,9 +255,7 @@ class ListenView(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.frequency = FrequencyDisplay(value_hz=self.engine.center_hz)
-        self.frequency.valueChanged.connect(self._tune)
-        outer.addWidget(self.frequency)
+        outer.addLayout(self._tuner())
         outer.addLayout(self._header())
 
         body = QHBoxLayout()
@@ -200,6 +264,41 @@ class ListenView(QWidget):
         body.addWidget(self._display(), 1)
         body.addWidget(self._controls())
         outer.addLayout(body, 1)
+
+    def _tuner(self) -> QHBoxLayout:
+        """The readout, with a step through the Discover list either side.
+
+        Available at every level, including Simple, and that is the same
+        argument as the Recently played section: Simple has no mode control
+        and no bandwidth, so somebody who has just been shown a list of
+        stations needs a way to walk it that does not involve going back to
+        the other screen and clicking Listen eleven times.
+
+        Both buttons are the same fixed width so the digits stay centred in
+        the window rather than shifting when one of them changes its label.
+        """
+        row = QHBoxLayout()
+        row.setContentsMargins(10, 0, 10, 0)
+        row.setSpacing(8)
+
+        self.previous_found = _button(f"{glyph('left')}  Previous")
+        self.previous_found.setObjectName("stepButton")
+        self.previous_found.setFixedWidth(STEP_BUTTON_WIDTH)
+        self.previous_found.clicked.connect(lambda: self._step_found(-1))
+
+        self.next_found = _button(f"Next  {glyph('right')}")
+        self.next_found.setObjectName("stepButton")
+        self.next_found.setFixedWidth(STEP_BUTTON_WIDTH)
+        self.next_found.clicked.connect(lambda: self._step_found(1))
+
+        self.frequency = FrequencyDisplay(value_hz=self.engine.center_hz)
+        self.frequency.valueChanged.connect(self._tune)
+
+        row.addWidget(self.previous_found)
+        row.addWidget(self.frequency, 1)
+        row.addWidget(self.next_found)
+        self._refresh_step_buttons()
+        return row
 
     def _header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -250,12 +349,16 @@ class ListenView(QWidget):
         layout = QVBoxLayout(display)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.ribbon = BandRibbon()
+        self.ribbon = BandRibbon(level=self.level)
         self.spectrum = SpectrumWidget()
         self.waterfall = WaterfallWidget()
         self.spectrum.tuneRequested.connect(self._tune_from_display)
         self.spectrum.bandwidthChanged.connect(self._set_bandwidth)
         self.waterfall.tuneRequested.connect(self._tune_from_display)
+        # Either pane can be the one under the pointer, and both report what
+        # the gesture asked for rather than acting on it alone.
+        self.spectrum.viewChanged.connect(self._view_changed)
+        self.waterfall.viewChanged.connect(self._view_changed)
 
         self._splitter = QSplitter(Qt.Orientation.Vertical)
         self._splitter.addWidget(self.spectrum)
@@ -277,6 +380,10 @@ class ListenView(QWidget):
 
     def _controls(self) -> QWidget:
         self.panel = ControlPanel()
+        # One connection for forty rows. Which of them offer an explanation is
+        # declared at each row's own call site, so this never has to be kept
+        # in step with a list somewhere else.
+        self.panel.helpRequested.connect(self.helpRequested.emit)
         self._build_audio_section()
         self._build_radio_section()
         self._build_recording_section()
@@ -294,7 +401,7 @@ class ListenView(QWidget):
         self.volume.setRange(0, 100)
         self.volume.setValue(int(self.engine.volume * 100))
         self.volume.valueChanged.connect(lambda v: self.engine.set_volume(v / 100.0))
-        section.add("Volume", self.volume)
+        section.add("Volume", self.volume, topic="volume")
 
         self.mute = QCheckBox("Mute")
         self.mute.toggled.connect(self.engine.set_mute)
@@ -313,7 +420,7 @@ class ListenView(QWidget):
             "carry it simply keep playing normally."
         )
         self.hd.toggled.connect(self._hd_toggled)
-        section.add_wide(self.hd, Level.SIMPLE)
+        section.add_wide(self.hd, Level.SIMPLE, topic="hd-radio")
 
         self.hd_program = QComboBox()
         self.hd_program.setToolTip(
@@ -322,7 +429,7 @@ class ListenView(QWidget):
             "has to be found again."
         )
         self.hd_program.currentIndexChanged.connect(self._hd_program_changed)
-        section.add_wide(self.hd_program, Level.SIMPLE)
+        section.add_wide(self.hd_program, Level.SIMPLE, topic="hd-program")
 
         self.hd_status = QLabel("")
         self.hd_status.setObjectName("hdStatus")
@@ -336,7 +443,7 @@ class ListenView(QWidget):
         self.audio_device.currentIndexChanged.connect(
             lambda: self.engine.set_audio_device(self.audio_device.currentData())
         )
-        section.add("Output", self.audio_device, Level.STANDARD)
+        section.add("Output", self.audio_device, Level.STANDARD, topic="audio-device")
 
     def _build_radio_section(self) -> None:
         section = self.panel.section("Radio", Level.STANDARD)
@@ -349,20 +456,20 @@ class ListenView(QWidget):
             )
         self.mode.setCurrentIndex(self.mode.findData(self.engine.mode))
         self.mode.currentIndexChanged.connect(self._mode_changed)
-        section.add("Mode", self.mode)
+        section.add("Mode", self.mode, topic="mode")
 
         self.bandwidth = _spin(0.1, 2_500.0, 200.0, " kHz")
         self.bandwidth.valueChanged.connect(
             lambda khz: self.engine.set_bandwidth(khz * 1000.0)
         )
-        section.add("Bandwidth", self.bandwidth)
+        section.add("Bandwidth", self.bandwidth, topic="bandwidth")
 
         self.squelch_on = QCheckBox("Squelch")
         self.squelch = _spin(-90.0, 0.0, -40.0, " dBFS")
         self.squelch_on.toggled.connect(self._squelch_changed)
         self.squelch.valueChanged.connect(self._squelch_changed)
-        section.add_wide(self.squelch_on)
-        section.add("Threshold", self.squelch)
+        section.add_wide(self.squelch_on, topic="squelch")
+        section.add("Threshold", self.squelch, topic="squelch")
 
         self.filter_taps = QComboBox()
         for label, taps in (
@@ -380,13 +487,15 @@ class ListenView(QWidget):
             "pushes a strong neighbour off a weak channel, at some cost in "
             "processing."
         )
-        section.add("Filter edge", self.filter_taps, Level.EXPERT)
+        section.add(
+            "Filter edge", self.filter_taps, Level.EXPERT, topic="filter-edge"
+        )
 
         self.gain = _spin(0.0, 49.6, 20.0, " dB")
         if self.engine.gain is not None:
             self.gain.setValue(self.engine.gain.gain_db)
         self.gain.valueChanged.connect(self.engine.set_gain)
-        section.add("RF gain", self.gain)
+        section.add("RF gain", self.gain, topic="rf-gain")
 
         measure = _button("Measure gain for this band")
         measure.clicked.connect(self.engine.auto_gain)
@@ -394,7 +503,7 @@ class ListenView(QWidget):
             "Finds the highest gain that does not overload the receiver. The "
             "right setting is about 30 dB apart between the AM band and FM."
         )
-        section.add_wide(measure)
+        section.add_wide(measure, topic="rf-gain")
 
         self.sample_rate = QComboBox()
         for rate in SUPPORTED_SAMPLE_RATES:
@@ -414,7 +523,7 @@ class ListenView(QWidget):
             "window puts the receiver's own oscillator on screen and drowns "
             "out the station."
         )
-        section.add("Window", self.sample_rate, Level.EXPERT)
+        section.add("Window", self.sample_rate, Level.EXPERT, topic="sample-rate")
 
         self.stereo = QCheckBox("Stereo")
         self.stereo.setChecked(self.engine.stereo_enabled)
@@ -424,7 +533,7 @@ class ListenView(QWidget):
             "channels on a second, quieter signal. A weak station may only "
             "manage the mono part of it, and the badge goes out when it does."
         )
-        section.add_wide(self.stereo, Level.STANDARD)
+        section.add_wide(self.stereo, Level.STANDARD, topic="stereo")
 
         self.stereo_blend = QCheckBox("Fade to mono on weak stations")
         self.stereo_blend.setChecked(self.engine.stereo_blend)
@@ -435,7 +544,7 @@ class ListenView(QWidget):
             "fades it out as the station weakens, which trades the stereo "
             "effect for a quieter, steadier sound."
         )
-        section.add_wide(self.stereo_blend, Level.EXPERT)
+        section.add_wide(self.stereo_blend, Level.EXPERT, topic="stereo-blend")
 
         self.rds = QCheckBox("Read station names (RDS)")
         self.rds.setChecked(self.engine.rds_enabled)
@@ -445,7 +554,7 @@ class ListenView(QWidget):
             "quiet subcarrier alongside the sound. It takes a few seconds to "
             "arrive and a weak station may never manage it."
         )
-        section.add_wide(self.rds, Level.STANDARD)
+        section.add_wide(self.rds, Level.STANDARD, topic="rds")
 
         self.pocsag = QCheckBox("Read pager messages (POCSAG)")
         self.pocsag.setChecked(self.engine.pocsag_enabled)
@@ -455,36 +564,36 @@ class ListenView(QWidget):
             "their messages as plain text. When a channel carries them, they "
             "appear in a panel under the waterfall."
         )
-        section.add_wide(self.pocsag, Level.STANDARD)
+        section.add_wide(self.pocsag, Level.STANDARD, topic="pocsag")
 
         self.tuner_agc = QCheckBox("Let the tuner set its own gain")
         self.tuner_agc.toggled.connect(self.engine.set_tuner_agc)
-        section.add_wide(self.tuner_agc, Level.EXPERT)
+        section.add_wide(self.tuner_agc, Level.EXPERT, topic="tuner-agc")
 
         self.digital_agc = QCheckBox("Receiver digital AGC")
         self.digital_agc.toggled.connect(self.engine.set_digital_agc)
-        section.add_wide(self.digital_agc, Level.EXPERT)
+        section.add_wide(self.digital_agc, Level.EXPERT, topic="digital-agc")
 
         self.ppm = QSpinBox()
         self.ppm.setRange(-200, 200)
         self.ppm.setSuffix(" ppm")
         self.ppm.setValue(self.engine.ppm)
         self.ppm.valueChanged.connect(self.engine.set_ppm)
-        section.add("Correction", self.ppm, Level.EXPERT)
+        section.add("Correction", self.ppm, Level.EXPERT, topic="ppm")
 
         self.calibrate_button = _button("Calibrate on this station")
         self.calibrate_button.clicked.connect(self._calibrate)
-        section.add_wide(self.calibrate_button, Level.EXPERT)
+        section.add_wide(self.calibrate_button, Level.EXPERT, topic="ppm")
 
         self.bias_tee = QCheckBox("Bias tee (4.5 V on the aerial)")
         self.bias_tee.toggled.connect(self._bias_tee_toggled)
-        section.add_wide(self.bias_tee, Level.EXPERT)
+        section.add_wide(self.bias_tee, Level.EXPERT, topic="bias-tee")
 
     def _build_recording_section(self) -> None:
         section = self.panel.section("Recording", Level.STANDARD)
         self.record_audio = _button("Record audio", checkable=True)
         self.record_audio.toggled.connect(self._record_audio_toggled)
-        section.add_wide(self.record_audio)
+        section.add_wide(self.record_audio, topic="audio-recording")
 
         self.record_iq = _button("Record raw IQ", checkable=True)
         self.record_iq.toggled.connect(self._record_iq_toggled)
@@ -492,7 +601,7 @@ class ListenView(QWidget):
             "Everything the aerial received, for replaying later. Large: "
             "4.8 MB every second at the widest window."
         )
-        section.add_wide(self.record_iq, Level.EXPERT)
+        section.add_wide(self.record_iq, Level.EXPERT, topic="iq-recording")
 
         self.recording_status = QLabel("")
         self.recording_status.setWordWrap(True)
@@ -503,7 +612,7 @@ class ListenView(QWidget):
         section = self.panel.section("Saved frequencies", Level.STANDARD)
         self.save_button = _button("Save this frequency")
         self.save_button.clicked.connect(self._save_current)
-        section.add_wide(self.save_button)
+        section.add_wide(self.save_button, topic="bookmarks")
 
         # A favourite implies a saved entry, so this saves first where there
         # is nothing to star yet. Two presses to get a station onto the
@@ -515,11 +624,11 @@ class ListenView(QWidget):
             "back to them without scanning."
         )
         self.favourite_button.clicked.connect(self._toggle_favourite)
-        section.add_wide(self.favourite_button)
+        section.add_wide(self.favourite_button, topic="favourites")
 
         manage = _button("Open my list...")
         manage.clicked.connect(self.open_frequency_manager)
-        section.add_wide(manage)
+        section.add_wide(manage, topic="bookmarks")
 
     def _build_history_section(self) -> None:
         """Where the radio has been - at Simple too, where nothing else is.
@@ -534,58 +643,74 @@ class ListenView(QWidget):
         self.back_button = _button("Back to the last station")
         self.back_button.setEnabled(False)
         self.back_button.clicked.connect(self._go_back)
-        section.add_wide(self.back_button)
+        section.add_wide(self.back_button, topic="recently-played")
 
         self.recent_list = QComboBox()
         self.recent_list.setToolTip(
             "Everything you have listened to for more than a few seconds."
         )
         self.recent_list.activated.connect(self._recent_chosen)
-        section.add_wide(self.recent_list)
+        section.add_wide(self.recent_list, topic="recently-played")
         self._recent_shown: tuple[tuple[int, str], ...] = ()
         self._refresh_history_controls()
 
     def _build_display_section(self) -> None:
         section = self.panel.section("Display", Level.STANDARD)
 
+        # The one row in this section that appears at Simple, and the reason
+        # is the wheel: somebody who scrolls over the spectrum by accident has
+        # zoomed in, and at Simple there would otherwise be nothing on screen
+        # to say what happened or how to undo it. It is also plain English and
+        # cannot affect what the radio is doing - only what is drawn.
+        self.zoom = QSlider(Qt.Orientation.Horizontal)
+        self.zoom.setRange(0, viewspan.SLIDER_STEPS)
+        self.zoom.setValue(0)
+        self.zoom.setToolTip(
+            "Look at a narrower slice of what the radio is receiving. "
+            "You can also scroll the wheel over the spectrum to zoom, drag "
+            "sideways to move along it, and click to tune to what you see."
+        )
+        self.zoom.valueChanged.connect(self._zoom_changed)
+        section.add("Zoom", self.zoom, Level.SIMPLE, topic="zoom")
+
         self.colour_map = QComboBox()
         self.colour_map.addItems(colormaps.NAMES)
         self.colour_map.setCurrentText(colormaps.DEFAULT_NAME)
         self.colour_map.currentTextChanged.connect(self.waterfall.set_colour_map)
-        section.add("Colours", self.colour_map)
+        section.add("Colours", self.colour_map, topic="colour-map")
 
         self.range_floor = _spin(-140.0, 0.0, -90.0, " dB")
         self.range_ceiling = _spin(-140.0, 0.0, -20.0, " dB")
         self.range_floor.valueChanged.connect(self._range_changed)
         self.range_ceiling.valueChanged.connect(self._range_changed)
-        section.add("Floor", self.range_floor)
-        section.add("Ceiling", self.range_ceiling)
+        section.add("Floor", self.range_floor, topic="display-range")
+        section.add("Ceiling", self.range_ceiling, topic="display-range")
 
         fit = _button("Fit to what is on screen")
         fit.clicked.connect(self._fit_now)
-        section.add_wide(fit)
+        section.add_wide(fit, topic="display-range")
 
         self.peak_hold = QCheckBox("Peak hold")
         self.peak_hold.setChecked(True)
         self.peak_hold.toggled.connect(self.spectrum.set_peak_hold)
-        section.add_wide(self.peak_hold)
+        section.add_wide(self.peak_hold, topic="peak-hold")
 
         self.fft_size = QComboBox()
         for size in FFT_SIZES:
             self.fft_size.addItem(f"{size}", size)
         self.fft_size.setCurrentIndex(self.fft_size.findData(self.engine.fft_size))
         self.fft_size.currentIndexChanged.connect(self._display_changed)
-        section.add("Resolution", self.fft_size, Level.EXPERT)
+        section.add("Resolution", self.fft_size, Level.EXPERT, topic="fft-size")
 
         self.fft_window = QComboBox()
         for name in WINDOWS:
             self.fft_window.addItem(WINDOW_LABELS.get(name, name), name)
         self.fft_window.currentIndexChanged.connect(self._display_changed)
-        section.add("Window", self.fft_window, Level.EXPERT)
+        section.add("Window", self.fft_window, Level.EXPERT, topic="fft-window")
 
         self.smoothing = _spin(0.0, 0.95, 0.0, "", decimals=2, step=0.05)
         self.smoothing.valueChanged.connect(self._display_changed)
-        section.add("Smoothing", self.smoothing, Level.EXPERT)
+        section.add("Smoothing", self.smoothing, Level.EXPERT, topic="smoothing")
 
         self.waterfall_speed = QComboBox()
         for label, frames in (("Fast", 1), ("Medium", 2), ("Slow", 4)):
@@ -593,13 +718,15 @@ class ListenView(QWidget):
         self.waterfall_speed.currentIndexChanged.connect(
             lambda: self.waterfall.set_speed(self.waterfall_speed.currentData())
         )
-        section.add("Waterfall", self.waterfall_speed, Level.EXPERT)
+        section.add(
+            "Waterfall", self.waterfall_speed, Level.EXPERT, topic="waterfall-speed"
+        )
 
         self.split = QSlider(Qt.Orientation.Horizontal)
         self.split.setRange(10, 90)
         self.split.setValue(40)
         self.split.valueChanged.connect(self._split_changed)
-        section.add("Split", self.split, Level.EXPERT)
+        section.add("Split", self.split, Level.EXPERT, topic="split")
 
     def _build_processing_section(self) -> None:
         section = self.panel.section("Processing", Level.EXPERT)
@@ -614,7 +741,7 @@ class ListenView(QWidget):
             "Broadcast FM boosts the treble before transmitting; this cuts it "
             "back. Skipping it is why a home-made FM receiver sounds thin."
         )
-        section.add("De-emphasis", self.deemphasis)
+        section.add("De-emphasis", self.deemphasis, topic="deemphasis")
 
         self.noise_blanker = QCheckBox("Noise blanker")
         self.noise_blanker.setToolTip(
@@ -624,22 +751,22 @@ class ListenView(QWidget):
         self.nb_threshold = _spin(1.5, 20.0, 4.0, "x", decimals=1, step=0.5)
         self.noise_blanker.toggled.connect(self._blanker_changed)
         self.nb_threshold.valueChanged.connect(self._blanker_changed)
-        section.add_wide(self.noise_blanker)
-        section.add("Above", self.nb_threshold)
+        section.add_wide(self.noise_blanker, topic="noise-blanker")
+        section.add("Above", self.nb_threshold, topic="noise-blanker")
 
         self.if_nr = QCheckBox("Noise reduction (radio)")
         self.if_nr_db = _spin(3.0, 30.0, 12.0, " dB", decimals=0)
         self.if_nr.toggled.connect(self._if_nr_changed)
         self.if_nr_db.valueChanged.connect(self._if_nr_changed)
-        section.add_wide(self.if_nr)
-        section.add("Depth", self.if_nr_db)
+        section.add_wide(self.if_nr, topic="if-noise-reduction")
+        section.add("Depth", self.if_nr_db, topic="if-noise-reduction")
 
         self.audio_nr = QCheckBox("Noise reduction (audio)")
         self.audio_nr_db = _spin(3.0, 30.0, 12.0, " dB", decimals=0)
         self.audio_nr.toggled.connect(self._audio_nr_changed)
         self.audio_nr_db.valueChanged.connect(self._audio_nr_changed)
-        section.add_wide(self.audio_nr)
-        section.add("Depth", self.audio_nr_db)
+        section.add_wide(self.audio_nr, topic="audio-noise-reduction")
+        section.add("Depth", self.audio_nr_db, topic="audio-noise-reduction")
 
         self.filter_audio = QCheckBox("Filter the audio")
         self.filter_audio.setToolTip(
@@ -650,11 +777,11 @@ class ListenView(QWidget):
         self.filter_audio.toggled.connect(
             lambda on: self.engine.audio.set_audio_filter(on)
         )
-        section.add_wide(self.filter_audio)
+        section.add_wide(self.filter_audio, topic="audio-filter")
 
         self.agc_on = QCheckBox("Automatic volume (AGC)")
         self.agc_on.toggled.connect(self._agc_changed)
-        section.add_wide(self.agc_on)
+        section.add_wide(self.agc_on, topic="audio-agc")
 
         self.agc_threshold = _spin(-90.0, -10.0, -55.0, " dBFS")
         self.agc_decay = _spin(20.0, 5_000.0, 500.0, " ms", decimals=0, step=50.0)
@@ -672,10 +799,10 @@ class ListenView(QWidget):
         for widget in (self.agc_threshold, self.agc_decay, self.agc_slope):
             widget.valueChanged.connect(self._agc_changed)
         self.agc_hang.toggled.connect(self._agc_changed)
-        section.add("Threshold", self.agc_threshold)
-        section.add("Decay", self.agc_decay)
-        section.add("Slope", self.agc_slope)
-        section.add_wide(self.agc_hang)
+        section.add("Threshold", self.agc_threshold, topic="agc-threshold")
+        section.add("Decay", self.agc_decay, topic="agc-decay")
+        section.add("Slope", self.agc_slope, topic="agc-slope")
+        section.add_wide(self.agc_hang, topic="agc-hang")
 
     def _build_correction_section(self) -> None:
         section = self.panel.section("Receiver correction", Level.EXPERT)
@@ -687,15 +814,15 @@ class ListenView(QWidget):
             "Cancels the mirror image the receiver puts on the far side of "
             "centre. Without it a strong station appears twice."
         )
-        for box, attribute in (
-            (self.dc_removal, "dc_removal"),
-            (self.iq_balance, "iq_balance"),
-            (self.swap_iq, "swap_iq"),
+        for box, attribute, topic in (
+            (self.dc_removal, "dc_removal", "dc-removal"),
+            (self.iq_balance, "iq_balance", "iq-imbalance"),
+            (self.swap_iq, "swap_iq", "swap-iq"),
         ):
             box.toggled.connect(
                 lambda on, name=attribute: setattr(self.engine.front, name, on)
             )
-            section.add_wide(box)
+            section.add_wide(box, topic=topic)
 
         self.offset_tuning = _spin(-500.0, 500.0, 0.0, " kHz", decimals=0, step=25.0)
         self.offset_tuning.valueChanged.connect(
@@ -706,7 +833,7 @@ class ListenView(QWidget):
             "software, so the spike at the middle of the window lands "
             "somewhere harmless instead of on top of what you are hearing."
         )
-        section.add("Offset tuning", self.offset_tuning)
+        section.add("Offset tuning", self.offset_tuning, topic="offset-tuning")
 
         self.imbalance_readout = QLabel("")
         self.imbalance_readout.setWordWrap(True)
@@ -724,6 +851,12 @@ class ListenView(QWidget):
         self.level = level
         self.panel.set_level(level)
         self.pager.set_level(level)
+        # Both say more from Standard upwards - the ribbon names the
+        # stretches no band covers, the header adds what a channel is
+        # officially called - so they are redrawn here rather than waiting
+        # for a retune to reword them.
+        self.ribbon.set_level(level)
+        self._update_band_label(self.engine.center_hz)
         # The panel shows every row that belongs at the new level, including
         # the ones this view hides for having nothing to say.
         self._refresh_recording()
@@ -809,6 +942,7 @@ class ListenView(QWidget):
         # After the band defaults, not before: they are what decides the mode
         # and bandwidth this visit will be remembered with.
         self._record_visit(hz)
+        self._refresh_step_buttons()
 
     def _apply_band_defaults(self, hz: float, force: bool = False) -> None:
         """Take mode and bandwidth from the band plan when the band changes.
@@ -907,6 +1041,44 @@ class ListenView(QWidget):
             self.bandwidth.setValue(bandwidth_hz / 1000.0)
         self._sync_save_button()
         self._record_visit(hz)
+        self._refresh_step_buttons()
+
+    # -- walking the Discover list -----------------------------------------
+
+    def set_results(self, signals: Sequence[Signal]) -> None:
+        """Adopt what the Discover screen is showing, cards and order alike.
+
+        Pushed in by the window rather than pulled out of the other view, so
+        this screen keeps knowing nothing about that one. An empty list is a
+        perfectly ordinary state - nobody has scanned yet - and the buttons
+        say so rather than disappearing, because a control that comes and
+        goes is harder to find the second time than one that is greyed out.
+        """
+        self._results = tuple(signals)
+        self._refresh_step_buttons()
+
+    def _step_found(self, delta: int) -> None:
+        target = results.neighbour(self._results, self.frequency.value_hz, delta)
+        if target is not None:
+            self.show_signal(target)
+
+    def _refresh_step_buttons(self) -> None:
+        """Say where each button goes, from wherever the dial is right now."""
+        for button, delta, word in (
+            (self.previous_found, -1, "Previous"),
+            (self.next_found, 1, "Next"),
+        ):
+            target = results.neighbour(self._results, self.frequency.value_hz, delta)
+            button.setEnabled(target is not None)
+            if target is None:
+                button.setToolTip(
+                    "Scan a band on the Discover screen and these step "
+                    "through what it found."
+                )
+            else:
+                button.setToolTip(
+                    f"{word} of what Discover found: {target.headline}"
+                )
 
     def _tune_from_display(self, hz: float) -> None:
         """Click-to-tune, snapped to the band's channel raster if it has one.
@@ -955,8 +1127,30 @@ class ListenView(QWidget):
     def _fit_now(self) -> None:
         frame = self.engine.latest()
         if frame is not None:
-            self.spectrum.auto_range(frame.spectrum_db)
-            self._fit_waterfall_range(frame.spectrum_db)
+            visible = self._visible(frame)
+            self.spectrum.auto_range(visible)
+            self._fit_waterfall_range(visible)
+
+    def _visible(self, frame: DisplayFrame) -> np.ndarray:
+        """The part of the transform that is actually on screen.
+
+        The button says "Fit to what is on screen" and the automatic fit is
+        the same measurement, so both have to mean the view rather than the
+        window once the two can differ. Zoomed into a quiet corner beside a
+        broadcast station, fitting to the whole window sets the ceiling from
+        a signal the user cannot see and flattens everything they can.
+        """
+        spectrum = frame.spectrum_db
+        bins = spectrum.size
+        if self._view.zoom <= 1.0 or bins == 0 or frame.sample_rate <= 0:
+            return spectrum
+        low, high = viewspan.span(frame.center_hz, frame.sample_rate, self._view)
+        scale = bins / frame.sample_rate
+        first = int(np.floor((low - frame.center_hz) * scale)) + bins // 2
+        last = int(np.ceil((high - frame.center_hz) * scale)) + bins // 2
+        first = min(max(first, 0), bins - 1)
+        last = min(max(last, first + 1), bins)
+        return spectrum[first:last]
 
     def _blanker_changed(self) -> None:
         self.engine.front.set_blanker(
@@ -1255,9 +1449,14 @@ class ListenView(QWidget):
         rds = self._station
         station = "" if rds is None else rds.callsign
         station = station or self._station_name
+        # And where the station has not said, a named channel beats the band
+        # it sits in: "Channel 16" against "Marine VHF", which is the group
+        # this is about to be filed under anyway.
+        channel = band.channel(self.engine.center_hz) if band else None
+        default = channel.name if channel is not None else (band.name if band else "")
         self.bookmarks.add(
             Bookmark(
-                name=station or (self.band_name.text() if band else ""),
+                name=station or default,
                 frequency_hz=int(self.engine.center_hz),
                 mode=self.mode.currentData(),
                 bandwidth_hz=self.bandwidth.value() * 1000.0,
@@ -1372,11 +1571,9 @@ class ListenView(QWidget):
         self.recent_list.setEnabled(bool(recent))
 
     def _update_band_label(self, hz: float) -> None:
-        band = bandplan.find(hz)
-        self.band_name.setText(band.name if band else "Unallocated")
-        self.band_info.setText(
-            band.description if band else "Nothing is normally broadcast here."
-        )
+        name, info = band_headline(hz, self.level)
+        self.band_name.setText(name)
+        self.band_info.setText(info)
 
     # -- refresh -----------------------------------------------------------
 
@@ -1433,16 +1630,17 @@ class ListenView(QWidget):
         )
         self.spectrum.set_passband(frame.center_hz, frame.bandwidth_hz)
         self.waterfall.push(frame.spectrum_db, frame.center_hz, frame.sample_rate)
-        low = frame.center_hz - frame.sample_rate / 2.0
-        self.ribbon.set_span(low, low + frame.sample_rate)
+        self.waterfall.set_tuned(frame.center_hz)
+        self._sync_view(frame)
 
         if not self._auto_ranged:
             # One automatic fit on the first real frame, so the display opens
             # showing signal rather than an empty rectangle the user has to
             # calibrate themselves.
             self._auto_ranged = True
-            self.spectrum.auto_range(frame.spectrum_db)
-            self._fit_waterfall_range(frame.spectrum_db)
+            visible = self._visible(frame)
+            self.spectrum.auto_range(visible)
+            self._fit_waterfall_range(visible)
 
         if self._frames % SLOW_TICK == 0:
             self._refresh_hd(frame)
@@ -1457,6 +1655,53 @@ class ListenView(QWidget):
             self.history.name(self._station_name)
             self.history.update()
             self._refresh_history_controls()
+
+    def _sync_view(self, frame: DisplayFrame) -> None:
+        """Keep the ribbon over the same stretch of dial as the two panes.
+
+        Also re-centres the pan whenever the radio moves. A view offset is a
+        fraction of the window, so it survives a retune arithmetically - and
+        would then be pointing a zoomed pane several channels away from the
+        station the user has just asked to listen to, because the window has
+        moved under it. Zoom is a standing preference and stays; where the
+        user had panned to was about the old window and does not.
+        """
+        if frame.center_hz != self._view_center_hz:
+            self._view_center_hz = frame.center_hz
+            if self._view.offset:
+                self._set_view(viewspan.View(self._view.zoom, 0.0))
+        low, high = viewspan.span(frame.center_hz, frame.sample_rate, self._view)
+        self.ribbon.set_span(low, high, frame.center_hz)
+
+    def _view_changed(self, zoom: float, offset: float) -> None:
+        """A pane was dragged or scrolled. Put the others where it is."""
+        self._set_view(viewspan.View(zoom, offset))
+
+    def _set_view(self, view: viewspan.View) -> None:
+        self._view = viewspan.clamped(*view)
+        self.spectrum.set_view(*self._view)
+        self.waterfall.set_view(*self._view)
+        self._sync_zoom_control()
+
+    def _sync_zoom_control(self) -> None:
+        """Show the wheel's answer on the slider, without answering it back."""
+        value = viewspan.slider_for_zoom(self._view.zoom)
+        if value == self.zoom.value():
+            return
+        self.zoom.blockSignals(True)
+        self.zoom.setValue(value)
+        self.zoom.blockSignals(False)
+
+    def _zoom_changed(self) -> None:
+        """The slider zooms about the middle of what is on screen.
+
+        Not about the tuned frequency: at 8x on a panned view the user is
+        looking somewhere else deliberately, and a slider that dragged the
+        view back to the middle of the window would undo the pan every time
+        it was touched.
+        """
+        zoom = viewspan.zoom_for_slider(self.zoom.value())
+        self._set_view(viewspan.zoomed(self._view, zoom / self._view.zoom))
 
     def _update_status(self, frame: DisplayFrame) -> None:
         parts = [

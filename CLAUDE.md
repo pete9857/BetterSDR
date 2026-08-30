@@ -21,7 +21,14 @@ Full roadmap and phase breakdown: **[docs/PLAN.md](docs/PLAN.md)**.
 | **1 — Listen** (demod, audio, spectrum/waterfall) | **Complete and verified on hardware** |
 | **2 — Discovery** (sweep, detect, classify) | **Complete and verified on hardware** |
 | **3 — SDR# parity** | **Complete and verified on hardware** (small gaps and untested paths listed in docs/PLAN.md) |
-| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo, ADS-B and HD Radio complete and verified on hardware** (HD Radio: engine, UI and seven local stations, 2026-08-28). **POCSAG complete and tested against synthetic transmissions, not yet heard off air** (2026-08-29). **Favourites, recently played and session history complete** (2026-08-29). **Stereo blend complete** (2026-08-29, not yet heard on a fringe station). **Aircraft map complete and seen with real aircraft** (2026-08-29), with a bundled Natural Earth basemap |
+| **4 — Decoders** (RDS, HD Radio, ADS-B, POCSAG) | **RDS, FM stereo, ADS-B and HD Radio complete and verified on hardware** (HD Radio: engine, UI and seven local stations, 2026-08-28). **POCSAG complete and tested against synthetic transmissions, not yet heard off air** (2026-08-29). **Favourites, recently played and session history complete** (2026-08-29). **Stereo blend complete** (2026-08-29, not yet heard on a fringe station). **Aircraft map complete and seen with real aircraft** (2026-08-29), with a bundled Natural Earth basemap. **Channel names and the licensed use of
+the unallocated dial complete** (2026-08-29). **Spectrum and waterfall zoom,
+panning and click-to-tune complete** (2026-08-29, driven through the real
+widgets offscreen but not yet with a dongle attached).
+**The Learn tab complete** (2026-08-29): 72 articles, a searchable
+home page, and every control caption on the listening and Discover
+screens a link into it. Driven through the real widgets offscreen;
+not yet read by a beginner, which is the only test that counts |
 | **5 — Packaging** | Not started |
 
 ### Driver state on this machine
@@ -1062,7 +1069,9 @@ bettersdr/
                   of the demodulator
   scan/
     bandplan/     us.yaml + loader; feeds the ribbon, the classifier and the
-                  Discover band chips (`scan: true`)
+                  Discover band chips (`scan: true`). Also the named channels
+                  inside a band - "Channel 16", "WX1" - and a second list
+                  saying what the space between the bands is licensed for
     detector.py   shaped noise floor, thresholding, grouping, persistence gate
     classifier.py band plan + shape features -> a labelled, explained Signal
     sweeper.py    step planning, the scan state machine, stitching
@@ -1086,15 +1095,28 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
     record.py     audio WAV and byte-exact baseband IQ WAV, with limits
   ui/
     app shell     main_window.py, levels.py, listen_view.py, discover_view.py,
-                  aircraft_view.py
+                  aircraft_view.py, learn_view.py
+    results.py    ordering and filtering the Discover list: the sort orders,
+                  the per-type chips and their counts, and the step from one
+                  found signal to the next. No Qt
+    learn/        glossary.yaml + loader: what every control means, in plain
+                  English, plus the search ranking and the [[slug]] link
+                  resolver. Data, like the band plan; no Qt. Control captions
+                  link into it by slug, so a slug is a promise
     basemap/      us.bsm + loader: the land, lakes, state lines and places
                   the aircraft map draws on - filled areas, not an outline.
                   Data, like the band plan; a second region is a second file
     freq_manager.py  the bookmark window
     widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
                   colormaps.py, axes.py, signalcard.py, aircraftcard.py,
-                  planemap.py, pagerlog.py, quicktune.py, icons.py,
-                  panel.py (the sectioned, level-gated control column)
+                  planemap.py, pagerlog.py, icons.py,
+                  panel.py (the sectioned, level-gated control column),
+                  help.py (a control's own name as the way in to what it
+                  means: the clickable caption and the question mark for
+                  rows that carry their own text),
+                  viewspan.py (how much of the captured window is on screen:
+                  the zoom and pan arithmetic, and the wheel, drag and click
+                  the spectrum and the waterfall share)
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
 tools/
   build_basemap.py  compiles ui/basemap/us.bsm from Natural Earth and the
@@ -1132,6 +1154,36 @@ Device control calls are serialised through a command queue consumed by the read
 - **The band plan is data.** `scan/bandplan/us.yaml` drives the ribbon, the
   auto mode/bandwidth on tuning, and later the classifier. A second region is a
   second file, not a second code path.
+- **A channel has two names and both ship.** "Channel 16" is what somebody on
+  a boat says; "International Distress, Safety and Calling" is what the rule
+  book and the chart say, and it is the phrase to search for. The friendly one
+  is shown at every level and the official one from Standard up - the same
+  progressive disclosure as the controls, applied to words.
+- **A channel list is listed, never counted off the raster.** CB channel 23
+  sits above 24 and 25, marine channels carry an A where the US uses the ship
+  half of a duplex pair simplex, and NOAA numbers its seven channels in an
+  order that is not their frequency order. Every channel must also land on its
+  band's raster, because `snap` and `channel` are two answers to the same
+  question and a click that tunes somewhere the app then refuses to name is
+  the NOAA-at-162.537 fault again.
+- **A name on the ribbon is measured, never estimated, and the one being
+  listened to always wins.** Whether a label fits is a question about a font
+  and a number of pixels, so it is answered with `QFontMetrics` and the view
+  box's width - a fraction-of-the-window rule has no idea that "Federal
+  government" and "2 m" are different lengths, and it both hid short names
+  that fitted and drew long ones through each other. Names are collected
+  first and drawn last, because whether one can be drawn depends on the
+  others; `without_collisions` resolves them by rank, and the band, the
+  allocation or the channel the receiver is actually on outranks everything,
+  keeps its name even when it is wider than its own block, and is the only
+  one drawn on a backing. Each lane is resolved separately - two names on
+  different rows are not a collision.
+- **"Unallocated" is not the same as "nothing here".** Half the tunable dial
+  is licensed to somebody, and `allocations` in the band plan says to whom -
+  read only where `find` came back empty, and only from Standard upwards.
+  They are deliberately not `Band`s: a band is a promise that the app has
+  something to offer there, and it carries a mode, a raster and a place on the
+  ribbon that none of this wants.
 - **Tuning into a new band adopts that band's mode and bandwidth**, but only on
   a change of band, so a deliberate choice survives retuning within one. In
   Simple mode there is no mode control at all, so without this an AM airband
@@ -1139,11 +1191,70 @@ Device control calls are serialised through a command queue consumed by the read
   broken.
 - **The three stacked panes share `AXIS_WIDTH`.** A waterfall offset from the
   spectrum above it puts every frequency wrong by a few hundred kHz.
+- **The window is what the radio captured; the view is what is on screen, and
+  they are no longer the same thing.** `ui/widgets/viewspan.py` says how much
+  of the window the panes are showing, as a zoom and an offset expressed in
+  fractions of the window rather than in hertz - so they still mean the same
+  thing after a retune or a change of window width. Zooming is a display
+  operation and makes no device call at all. The listening screen owns the one
+  copy of it, because the spectrum, the waterfall and the ribbon must show the
+  same span and none of them knows the others exist.
+- **Zoom is a standing preference; a pan is about the window it was made in.**
+  So a retune keeps the zoom and re-centres the pan. An offset survives a
+  retune arithmetically and would then be pointing a zoomed pane several
+  channels away from the station the user has just asked to hear.
+- **A gesture on a pane reports what it asked for; it does not act alone.**
+  Both panes emit `viewChanged` and are told what to display, which is the
+  same shape as every other crossing in `ui/` - and it is what stops the two
+  of them drifting apart by a pixel per drag.
 - **Widget logic that can be pure, is.** Colour maps, the digit arithmetic and
   the waterfall ring are plain functions tested without a window.
 - **Discover is the landing screen at every level.** Opening on a spectrum is
   what every other SDR application does; being shown a list of what is actually
   out there is the argument this one is making.
+- **A list nobody can read is the same failure as a list that is wrong.** An
+  indoor aerial fills the airband with 83 unmodulated carriers, and every one
+  of them is real RF the app is right to report. `ui/results.py` is the answer:
+  an order the user picks, and a chip per classification that puts a whole kind
+  out of sight. Hiding is by the classifier's own label, so the filter is
+  worded in the same plain English as the cards, and the chip and the status
+  line both keep saying how many are being held back - a filter that persists
+  between sittings must never be mistakable for a sweep that found nothing.
+- **The Discover list is walked from the listening screen, not reached back
+  into.** The step buttons either side of the frequency readout move through
+  what Discover is *showing* - its order, minus what its chips are hiding -
+  because that is the list the user was just looking at, and a button that
+  visited a kind they had put out of sight would be the two screens
+  disagreeing. `DiscoverView` emits what it draws and `ListenView.set_results`
+  takes it; neither view knows the other exists, the same as every other
+  crossing in `ui/`.
+- **A control's own name is the way in to what it means.** The Learn tab
+  would be a manual nobody opens if the only route to it were the Learn tab;
+  the route that matters is somebody looking at a row called "Threshold",
+  not knowing what a threshold is, and clicking the word. So `topic=` at a
+  row's call site is one more word beside `level`, and for the same reason -
+  explaining a control belongs where the control is declared, not in a second
+  list that will drift out of step with this one. Two captions read
+  "Threshold" and two read "Depth"; they are not the same topics, which is
+  exactly why this cannot be a lookup keyed on the caption text.
+- **Nothing may look clickable and then do nothing.** A caption is only made
+  a link where `learn.has()` says there is an article, an inline `[[slug]]`
+  with nothing behind it renders as plain prose rather than a dead anchor,
+  and a see-also chip for a missing article is not drawn. The failure this
+  guards against is the one nobody reports: a renamed slug leaves forty
+  captions looking completely normal and quietly never offering anything
+  again. `tests/test_learn.py` reads every `topic=` in `ui/` and checks it.
+- **The Learn tab is not level-gated, and that is deliberate.** Levels decide
+  what you may change, never what you may understand. Somebody in Simple mode
+  who has read the words "RF gain" somewhere is precisely the reader the tab
+  exists for, and the fact that they cannot yet see that control is not a
+  reason to withhold the explanation of it.
+- **Learn content is data.** `ui/learn/glossary.yaml` carries the articles,
+  their aliases, their cross-references and where each control lives, in the
+  order a beginner meets them - which is why the home page browses by
+  category rather than offering an A-Z. A rewrite for a different audience,
+  or a second language, is a second file and not a second code path, the same
+  bargain as the band plan and the basemap.
 - **The classifier says why, and says when it is unsure.** Every `Signal`
   carries `reasons`; a card with `certain` false is badged BEST GUESS. "Unknown
   signal" and "Unmodulated carrier" are valid, non-embarrassing answers, and a

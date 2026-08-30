@@ -383,13 +383,29 @@ checklist rather than assuming.
   listening to it, a recent list persisted to `history.json`, and this
   session's trail behind a Back button. `Bookmark` gains a `favourite` flag,
   so a favourite is the saved entry marked rather than a second record of the
-  same station. `ui/widgets/quicktune.py` is a strip of chips above the band
-  buttons on Discover — favourites first, then recently played, no frequency
-  twice — which hides itself until there is something in it, so a first run
-  sees exactly the screen it saw before this existed. The listening screen
-  gains a Recently played section at **Simple**, where nothing else is: a
-  beginner who tunes away from something they were enjoying previously had no
-  way back to it. Findings are in **Amendment 12**.
+  same station. The listening screen gains a Recently played section at
+  **Simple**, where nothing else is: a beginner who tunes away from something
+  they were enjoying previously had no way back to it. Findings are in
+  **Amendment 12**.
+
+  This first shipped with a strip of favourite and recently-played chips above
+  the band buttons on Discover as well (`ui/widgets/quicktune.py`). It was
+  removed on 2026-08-29: Discover had grown band chips, a scan row, type chips
+  and a status line above the list it exists to show, and the one thing on that
+  screen a beginner does not need is a second route to a station they have
+  already found. The route that stays is the one on the screen where somebody
+  is actually listening.
+- Stepping through what was found, from the listening screen.
+
+  **Status: complete, 2026-08-29.** Buttons either side of the frequency
+  readout walk the Discover list without going back to it — `results.neighbour`
+  against the list *as displayed*, so the order the user chose is the order
+  they step in and a kind they have hidden is a kind they skip. It wraps, the
+  way a car radio's seek does, and a dial that is nowhere in the list enters it
+  from whichever end was pressed. Available at **Simple**, the same argument as
+  Recently played: Simple has no mode control and no bandwidth, so a beginner
+  handed a list of eleven stations should not have to visit the other screen
+  eleven times to hear them.
 
   Two things it deliberately does not do. It does not record a frequency the
   dial merely passed through, and it does not count time spent on another
@@ -1962,3 +1978,493 @@ understands.
   probably better ordering for the strip than "most recent", and which one is
   right is a question about how somebody actually uses the app rather than one
   to be settled here.
+
+---
+
+## Amendment 14 — Channel names, and what to say where there is nothing to hear (2026-08-29)
+
+Two complaints about the same screen. The listening header read **"Marine
+VHF — Boats talking to each other, to harbours, and to the coastguard"** at
+156.800 MHz, which is where everybody on the water says **Channel 16**; and
+across roughly half of the tunable dial it read **"Nothing is normally
+broadcast here"**, which for the 700 MHz mobile phone band is not modesty but
+a false statement.
+
+Both are answered with data rather than code: a `channels` list inside a band,
+and a second top-level `allocations` list for the space between the bands.
+159 channels and 41 allocations, about 1,300 lines of YAML, and no per-band
+code path anywhere.
+
+### A channel has two names, and which one is shown is a level decision
+
+`Channel(name, frequency_hz, use, official)`. `name` is what somebody would
+say out loud — "Channel 16", "WX1", "Guard". `official` is the designation in
+the rule book — "International Distress, Safety and Calling" — which is the
+phrase to search for and the one printed on a chart. `use` is the plain
+English, held to the same standard as `Band.description`.
+
+The friendly name is drawn on the ribbon at **every** level, because a
+channel number is not an expert feature; a beginner tuning across the marine
+band is exactly who needs it. The regulator's phrase is appended to the
+header's prose from **Standard** upwards, and so is the licensed use of a
+stretch of dial no band covers. This is the progressive-disclosure rule that
+already governs the control panel, applied to words instead of widgets:
+nothing is removed at a lower level, it is only quiet until asked for.
+
+`band_headline(hz, level)` is a plain function in `ui/listen_view.py` and
+returns the two strings the header needs. The interesting part is the wording
+and the gating, not the labels it ends up in, so it is tested without a
+window — same argument as the colour maps and the digit arithmetic.
+
+### A channel claims half a raster, and no more
+
+Marine channels sit shoulder to shoulder on a 25 kHz raster, so every dial
+position inside the band belongs to one of them and the name has to change the
+moment the dial crosses the halfway point. The airband is the opposite: eight
+frequencies everybody knows out of a thousand ordinary tower and approach
+channels, so 118.300 MHz has to come back with **nothing** rather than
+borrowing the name of the nearest one. Half the raster where a band has one,
+half the channel width where it does not, serves both.
+
+### The lists are listed, not counted
+
+Every one of these would be wrong if the channel numbers were derived from the
+raster:
+
+- **CB channel 23 sits above 24 and 25**, at 27.255 MHz, and has since 1977.
+- **Marine channels carry an A** where the US uses the ship half of an
+  international duplex pair as a simplex channel — 18A, 22A, 79A — and the
+  shore halves are 4.6 MHz up, in the same band, under the same numbers.
+- **NOAA numbers its seven weather channels** WX1 at 162.550 down to WX7 at
+  162.525, which is neither frequency order nor anything else.
+- **FRS and GMRS interleave**: channels 1–7 shared, 8–14 low power on the
+  467 MHz interstitials, 15–22 on the 25 kHz grid, and eight repeater inputs
+  5 MHz above the last of them.
+
+A test asserts that **every channel lands on its own band's raster**, because
+`snap` and `channel` are two answers to the same question. A channel half a
+step off would be clickable and then unnameable — the NOAA-at-162.537 fault
+from "Channel rasters are per-band data", in a new place.
+
+### Why the allocations are not bands
+
+A `Band` is a promise: the app has something to offer here, so it carries a
+mode, a bandwidth, a raster, a colour on the ribbon and possibly a scan chip.
+None of that is true of the 600 MHz mobile phone band. Making these `Band`s
+would have put twenty new stripes on the ribbon, offered the classifier
+priors it cannot use, and — worst — handed `_apply_band_defaults` a mode to
+switch the demodulator to on the way past. So they are a separate list with
+prose and nothing else, read by one function, only where `find` came back
+empty, and only from Standard up. At Simple, a stretch of dial with nothing to
+listen to is better left quiet than explained.
+
+### The coverage test found two gaps nobody would have thought of
+
+A test merges the bands into intervals, walks the gaps between them across the
+whole 500 kHz – 1.766 GHz tuning range, and demands an entry for each. Two of
+them were invisible by eye:
+
+- **117.975–118.000 MHz**, the 25 kHz guard band between the navigation
+  beacons and the air traffic channels. It is 25 kHz wide and the app can tune
+  into it.
+- **162.025–162.400 MHz**, between the top of the marine band and the bottom
+  of the weather channels — federal government, and the pool the weather
+  channels themselves come out of.
+
+The same test is what will catch a future band being added with an allocation
+left overlapping it, and a second test asserts the two lists never both answer
+for the same frequency.
+
+### Also
+
+The bookmark a channel is saved from is now named **"Channel 16"** rather than
+"Marine VHF", where the station has not named itself — the band is already the
+group it is filed under, so repeating it would have been the only thing on the
+row that said nothing.
+
+### The names belong on the spectrum, not above it
+
+The first version put all of this in the header: a chip reading **Channel 16**
+next to the band name, and the licensed use as prose underneath. It was
+correct and it was in the wrong place. A frequency is a position, and the
+ribbon is the only part of the screen that draws positions - a name up in the
+header says what you are on, and a name on the ribbon says that *and* how wide
+the channel is, where its edges are, and what is either side of it.
+
+So the ribbon grew a second lane. The top one is the band plan it always drew,
+and from Standard up it now also blocks in and names the stretches no band
+covers, so it stops going blank over half the dial. The bottom lane appears
+only when the band under the cursor has named channels, and it is a real grid
+of them once a channel is at least 1.2% of the window - 96 marine channels in
+a 2.4 MHz window is a texture, not a ruler. Below that the grid stays away and
+**the channel being listened to is drawn anyway**, which is exactly the
+window where somebody most needs telling they are on Channel 16.
+
+`channel_cells` is a plain function, tested without a window, for the same
+reason the colour maps and the digit arithmetic are.
+
+### Whether a name fits is a question about a font, so it is asked of the font
+
+The labels were first placed with a fraction-of-the-window rule - draw the
+name if its block is more than some percentage of the span. Rendering seven
+situations to a PNG and reading them back showed what that cannot see: at
+162.550 MHz the ribbon read **"Federal governmentWeather Radio"**, two names
+260 kHz apart in a 2.4 MHz window, because a fraction rule never compares two
+labels with each other. It also has no idea that "Federal government" and
+"2 m" are different lengths, so elsewhere it was hiding short names that
+fitted perfectly well.
+
+Names are now measured with `QFontMetrics`, in the font they will actually be
+drawn in, against the view box's real width. They are collected first and
+drawn last, because whether one can be drawn depends on the others, and
+`without_collisions` - pure, and tested - decides by **rank**: the band, the
+allocation or the channel the receiver is on outranks a neighbour, always.
+The one the fraction rule dropped at 162.550 was the band being listened to,
+which is the priority exactly backwards.
+
+Two consequences fall out of that rule and both are deliberate:
+
+- **The tuned name is not measured against its own block.** Weather Radio is
+  150 kHz of a 2.4 MHz window and its name is half as wide again as its
+  stripe. Every other name that overhangs its block is a name for its
+  neighbour and is dropped; that one is the name the user is looking for.
+- **It is therefore the only name drawn on a backing.** A label allowed to
+  overhang has the block's own edges drawn through the middle of its letters,
+  which is what a 25 kHz cell in a 2.4 MHz window does to "Channel 16".
+
+The two lanes are resolved separately, since names on different rows are not a
+collision, and the widget's width is part of the redraw cache key - what fits
+depends on it, so a resize that did not redraw would leave labels touching.
+
+### What is left
+
+- **Discover cards do not name the channel either.** A card reading "Marine
+  radio - 156.800 MHz" could say "Channel 16", and the classifier already has
+  the band in its hand when it writes that line.
+- **The two halves of a duplex channel are listed but not paired.** The shore
+  side of channel 24 is in the list as "Channel 24 (shore)" and the app has no
+  idea it is the other end of the same conversation.
+- **The channel lists are as US-specific as the bands are.** A European file
+  would have marine channels without the A suffixes, no FRS or GMRS at all,
+  and PMR446 instead — which is what `region` is for, and it stays a second
+  file rather than a second code path.
+
+## Amendment 15 — Zoom, pan and click-to-tune on the spectrum (2026-08-29)
+
+Three requests about the same picture: a **width zoom** on the waterfall and
+the spectrum, **horizontal panning** for scanning across a band by eye, and
+**click-to-tune on the spectrum** the way the waterfall already does it. All
+three are SDR# parity and none of them needs anything from the radio.
+
+### The window and the view are now two different things
+
+Until now the display *was* the window: `sample_rate` hertz, centred on the
+tuned frequency, drawn edge to edge. That made "what is sitting next to this
+signal?" a question the app could only answer by narrowing the window, which
+changes what the receiver is doing rather than what the screen is showing —
+and at 2.4 MS/s a 12.5 kHz marine channel is a fifth of one pixel on a
+thousand-pixel pane, so it was a question worth being able to ask.
+
+`ui/widgets/viewspan.py` holds the whole of it, and it is two numbers:
+
+    zoom    how many times narrower than the window the view is, never < 1
+    offset  where the middle of the view sits, as a fraction of the whole
+            window away from its middle
+
+Fractions of the window rather than hertz, so a retune or a change of window
+width leaves them meaning the same thing afterwards. Nothing else changes: the
+same transform, the same rows of waterfall history, the same one device call
+per tune. The arithmetic is pure and tested, and it lives in one place because
+**three stacked panes have to agree on it exactly** — a waterfall showing a
+slightly different span from the spectrum above it puts every frequency wrong,
+which is the fault `AXIS_WIDTH` exists to prevent one layer further down.
+
+### The middle of the picture stopped being the tuned frequency
+
+The band ribbon derived the tuned frequency from the span it was handed, on
+the reasoning that the window is always drawn centred on where the radio is
+pointed. Panning ends that: the middle of a panned view is wherever the user
+dragged to, and the ribbon would have highlighted whichever channel happened
+to be in the centre of the screen rather than the one being listened to —
+which is the single piece of information that lane exists to carry.
+`set_span` takes the tuned frequency explicitly now.
+
+### A pan is about the window it was made in, so a retune discards it
+
+Zoom is a standing preference and survives everything. The offset does not:
+it is a fraction, so it survives a retune *arithmetically* and would then be
+pointing a zoomed pane several channels away from the station the user had
+just asked to hear, because the window moved underneath it. `_sync_view`
+re-centres on any change of `center_hz`, which covers click-to-tune, the digit
+readout, bookmarks, the Discover step buttons and the way back from an
+aircraft excursion, in one place rather than in seven.
+
+### "Fit to what is on screen" had to start meaning it
+
+The automatic fit and the button are the same measurement, and both took the
+whole transform. Zoomed into a quiet stretch beside a broadcast station, that
+sets the ceiling from a signal the user cannot see and flattens everything
+they can. Both take the visible slice now.
+
+### The passband gave up its body and kept its edges
+
+A single click on the spectrum used to be reserved for dragging the passband,
+which is why tuning there needed a double click. Clicking says where to listen
+far more directly than dragging a block does, so the body of the passband is
+no longer movable — and it could not have stayed, because at 8x zoom a
+broadcast passband fills the pane and would have swallowed every press meant
+for the spectrum behind it.
+
+The edges are still handles, and the hit test for them is in **pixels, not
+hertz**: a passband is 200 kHz wide on a broadcast station and 500 Hz on a CW
+signal, and a handle has to be the same size under the pointer either way.
+Dragging one now changes the bandwidth and *only* the bandwidth — it is
+measured from the frequency being listened to rather than from the other edge,
+so the passband stays centred where the radio is. Before, an edge drag moved
+the centre as well and retuned, which dragged the passband out from under the
+pointer halfway through setting a filter width.
+
+### Not calling `super()` is the mechanism, not an omission
+
+pyqtgraph's scene turns a press it has seen into click and drag events for the
+items under it. A pan that let the scene see its own press would drag the
+passband along with the view. So the press is consumed outright unless it
+lands on a passband edge, in which case it is passed straight through and
+pyqtgraph handles the whole gesture as it always did. Moves with nothing held
+down are always forwarded, or the edges stop lighting up under the pointer.
+
+### A click is a drag that did not go anywhere
+
+Four pixels of slop. Not zero: a mouse moves a pixel or two under a real
+finger, and a click that silently became a one-pixel pan would read as
+click-to-tune being broken. The pan itself is measured against the frequency
+the drag *started* on rather than accumulated from the last move, so what the
+clamp discards at the edge of the window is discarded rather than stored —
+dragging back off the edge moves the view on the first pixel instead of after
+undoing however far the pointer travelled past the end.
+
+### The zoom slider is the one Display row that appears at Simple
+
+Everything else in that section is a Standard control and stays one. The wheel
+is the reason: somebody who scrolls over the spectrum by accident has zoomed
+in, and at Simple there would otherwise be nothing on screen to say what
+happened or how to undo it. It is plain English, it cannot affect what the
+radio is doing, and it doubles as where the two gestures are explained.
+
+Its travel is logarithmic. A linear slider spends its first half between 1x
+and 32x and its second half between 32x and 64x, which is one useful step and
+a hundred useless ones.
+
+**Zoom is deliberately not remembered between sittings.** Opening on a 37 kHz
+sliver of the FM band looks like a broken radio, and the display settings that
+are restored are restored precisely because none of them can look like a
+fault.
+
+### Where the limits come from
+
+`MAX_ZOOM` is 64, which fills the pane with one 12.5 kHz channel out of a
+2.4 MHz window — the narrowest thing the app has to show against the widest
+window it opens. Past that the transform runs out of bins before the eye runs
+out of detail: 4096 bins across 2.4 MHz is 586 Hz each, so a 37 kHz view is
+already only 64 of them, and zooming further magnifies the FFT rather than the
+radio. A wheel notch is 1.2, which is 23 notches end to end.
+
+### What is left
+
+- **Not yet seen on hardware.** The arithmetic is covered by tests and the
+  gestures were driven through the real widgets offscreen at all three levels,
+  but nobody has yet dragged across the FM band with a dongle plugged in.
+- **The waterfall magnifies its own pixels.** At 64x the history is 64 bins
+  across the pane, so the rows go blocky. That is honest about the resolution
+  of the transform and the answer is the FFT size control, but a receiver that
+  raised the resolution itself as the view narrowed would be better.
+- **Discover has no spectrum to zoom.** The panes belong to the listening
+  screen; a zoomed sweep view is a different feature.
+
+## Amendment 16 — The Learn tab, and a control that explains itself (2026-08-29)
+
+A fourth screen beside Discover, Listen and Aircraft, and one new gesture that
+matters more than the screen does: **clicking the name of a control takes you
+to what it means.**
+
+### Why this is the second half of a principle already stated
+
+The project runs on two principles, and until now the second one — *the app
+explains itself* — was spent entirely on the classifier. Every `Signal`
+carries `reasons`; every card can say "constant power, 150 kHz wide, sits in
+the 88–108 MHz broadcast band". That is genuinely the product, and it explains
+exactly one thing: what the app just found.
+
+It does not explain the app. Phase 3 took the listening screen from eight
+controls to about forty, and forty controls called Squelch, De-emphasis,
+Filter edge, Offset tuning and IQ imbalance are friendly only to somebody who
+already knows what those words mean — which is precisely the person who did
+not need this application. A beginner-facing radio with forty undefined terms
+on one screen has quietly capped itself at the users it was built to replace.
+
+So the same argument that produced `reasons` produces this. The difference is
+only what is being explained.
+
+### The route that matters is not the tab
+
+A Learn tab reached only by pressing Learn is a manual, and nobody opens a
+manual. The moment an explanation is wanted is the moment somebody is looking
+at a row called "Threshold", does not know what a threshold is, and wonders.
+That is the only moment the app can be certain of, and the only sane thing to
+do with it is make the word itself the way in.
+
+Hence `topic=` at the row's own call site, one word beside `level`:
+
+    section.add("RF gain", self.gain, topic="rf-gain")
+    section.add_wide(self.squelch_on, topic="squelch")
+
+It has to live there and not in a lookup table keyed on the caption, because
+**two rows are called "Threshold" and they are not the same threshold** — one
+is the squelch, one is the audio gain rider. Two more are called "Depth", and
+two are called "Window", one of which is the FFT taper and the other the width
+of dial the dongle captures. A table keyed on what the label says would have
+been right about most of them and confidently wrong about six.
+
+Fifty-six rows on the listening screen carry a topic; two on Discover do.
+
+### Two shapes, because a check box carries its own text
+
+A labelled row's caption becomes the link — the caption is what the reader is
+looking at and puzzled by. A check box already carries its text and clicking
+that text has to keep toggling it, so those rows get a small question mark
+beside them instead. `widgets/help.py` holds both, and the panel gathers every
+one of them onto a single `helpRequested` so the view above connects once
+rather than fifty-six times.
+
+The resting colour is exactly the ordinary caption colour, and only hover
+lights up. Fifty-six bright links down a control column would compete with the
+controls. The dotted underline is always drawn and always the caption's own
+colour, so nothing moves between resting and hovered — a label that *grew* an
+underline on hover would nudge the field beside it by a pixel, on every row of
+a scrolling column.
+
+### Nothing may look clickable and then do nothing
+
+This is the one failure the feature can have that nobody would ever report. A
+caption pointing at a topic with no article falls back to a plain `QLabel`:
+the control looks completely normal and simply never offers an explanation
+again. Rename a slug and forty captions go quiet at once, with no error, no
+crash and nothing on screen to notice.
+
+So the guard is in three places and a test:
+
+- `label_for` asks `learn.has()` before making anything a link;
+- an inline `[[slug]]` with nothing behind it renders as **plain prose**, not
+  as a dead anchor — a dead anchor survives review because the sentence still
+  reads correctly and fails only under a cursor;
+- a see-also chip for a missing article is not drawn at all;
+- `tests/test_learn.py` reads every `topic="..."` in `ui/` out of the source
+  and asserts each one has an article. Reading the source rather than building
+  a `ControlPanel` is deliberate: the string in the source is the thing that
+  has to be right, and checking it needs neither a Qt application nor an
+  `Engine`.
+
+### The content is data, and its order is content
+
+`ui/learn/glossary.yaml` is 72 articles under eight headings, and the headings
+are in the order a beginner meets them — Start here, Listening, Seeing the
+signal, The receiver, Cleaning up the sound, Finding things, Decoding,
+Recording and saving. That ordering is a claim about what to read first, so
+the home page **browses by category rather than offering an A-Z**: an
+alphabetical index only helps somebody who already knows the vocabulary, which
+is the exact thing the reader does not have.
+
+Each article carries a one-sentence summary that has to stand alone (it is all
+the browse list shows), the other names the thing goes by, where in the app
+the control actually is, and cross-references. Same bargain as the band plan
+and the basemap: a rewrite for a different audience, or a second language, is
+a second file and not a second code path.
+
+### Two decisions inside the search box
+
+**Aliases are the whole reason it is not a title match.** Nobody looking up
+"capcode" knows the article is called POCSAG, and nobody who read "SNR" on a
+forum knows this app spells it out. Every article carries the other names it
+goes by, and they are searched and shown.
+
+**The exact-match bonus is judged against the whole query, never one word of
+it**, and that was a bug found by a test rather than by reasoning. Awarding it
+per term let the article whose *slug* is "stereo" beat the one actually called
+"Stereo blend" on the query `stereo blend` — the first collected a
+whole-article bonus for half of what was typed plus a passing mention of the
+other half. An exact match is a claim about what somebody asked for, so it has
+to be measured against all of it.
+
+There is also a fallback: every word must match, *unless that finds nothing*,
+in which case any word will do. People type questions into search boxes — "why
+is my audio quiet" — and requiring "why", "is" and "my" all to appear answers
+a perfectly reasonable question with a blank page, which reads as a glossary
+that does not cover it.
+
+### Back means two different things, and both are right
+
+An article opened by clicking a control gets a **Back** button that returns to
+the screen the control was on; one reached by browsing gets **All topics** and
+returns to the home page. Following a link inside an article keeps whichever
+journey the reader was on, so somebody who arrived from a control and read two
+cross-references deep still gets their control back.
+
+Pressing the Learn tab itself always lands on the home page, even from an open
+article. Somebody reaching for the tab has a browsing question rather than the
+one specific question that brought them here from a control, and an article
+left over from twenty minutes ago is a Learn tab that appears to contain one
+entry.
+
+### Nothing here is level-gated, which is an exception on purpose
+
+Every other part of the UI hides what belongs to a higher level. This part
+must not. **Levels decide what you may change, never what you may
+understand.** Somebody in Simple mode who has read the words "RF gain"
+somewhere and wants to know what they mean is exactly the reader this exists
+for, and the fact that they cannot yet *see* that control is not a reason to
+withhold the explanation of it. `set_level` is accepted and stored and gates
+nothing.
+
+### What it cost
+
+Nothing measurable. The screen has no timer, touches no device and does not
+poll — it is the only page in the app with nothing live on it, so `start` and
+`stop` exist purely to satisfy the protocol the window expects. The content
+file is 55 KB of YAML parsed once and cached. A `HelpLabel` is a `QLabel` with
+two extra event handlers.
+
+### Verified, 2026-08-29
+
+Driven through the real widgets offscreen, with a stub engine:
+
+- the panel raises `helpRequested` from both shapes of row, and reports only
+  the topics that have articles behind them;
+- all 72 articles render, every see-also chip resolves, and every inline link
+  in the file points at something that exists;
+- clicking **RF gain** on the listening screen and **Sensitivity** on Discover
+  both open the right article and both come back to the right screen;
+- pressing the Learn tab from an open article shows the home page with the
+  search box cleared;
+- level changes reach the page and hide nothing.
+
+824 tests pass and `ruff check .` is clean.
+
+### What is left
+
+- **Nobody has read it yet.** Seventy-two articles written in one sitting are
+  seventy-two chances to have explained something in terms of something else
+  the reader also does not know. This is the ADS-B situation again: every
+  synthetic test passed and the real sky found the fault. The check is one
+  beginner and twenty minutes.
+- **The Aircraft screen names no topics.** Its controls are a filter and a
+  map, and `adsb` is written and browsable, but nothing on that screen links
+  to it.
+- **The no-radio screen has no Learn tab.** When the dongle is missing the
+  nav is disabled wholesale, which is defensible — that screen is about
+  fixing the driver — but Learn is the one page that needs no hardware at
+  all, and a first-time user staring at a driver problem is not the worst
+  audience for it.
+- **The band plan and the glossary do not know about each other.** A band's
+  description and an article about that band are written twice, in two files,
+  in the same voice. Nothing is wrong yet; they will drift.
+- **No article explains the Learn tab.** That is probably correct.

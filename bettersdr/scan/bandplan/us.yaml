@@ -51,6 +51,214 @@ bands:
     description: >
       Citizens Band - short-range radio anyone may use without a licence,
       popular with truck drivers.
+    channels:
+      - hz: 26_965_000
+        name: Channel 1
+        official: Citizens Band channel 1
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 26_975_000
+        name: Channel 2
+        official: Citizens Band channel 2
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 26_985_000
+        name: Channel 3
+        official: Citizens Band channel 3
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_005_000
+        name: Channel 4
+        official: Citizens Band channel 4
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_015_000
+        name: Channel 5
+        official: Citizens Band channel 5
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_025_000
+        name: Channel 6
+        official: Citizens Band channel 6 - calling
+        use: >
+          Nominally an ordinary channel; in practice the one operators
+          running illegal amplifiers gather on, and often the loudest
+          thing on the band.
+      - hz: 27_035_000
+        name: Channel 7
+        official: Citizens Band channel 7
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_055_000
+        name: Channel 8
+        official: Citizens Band channel 8
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_065_000
+        name: Channel 9
+        official: Citizens Band channel 9 - emergency and traveller assistance
+        use: >
+          The emergency channel. Some police forces and volunteer groups
+          still monitor it, and nothing routine may use it.
+      - hz: 27_075_000
+        name: Channel 10
+        official: Citizens Band channel 10
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_085_000
+        name: Channel 11
+        official: Citizens Band channel 11
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_105_000
+        name: Channel 12
+        official: Citizens Band channel 12
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_115_000
+        name: Channel 13
+        official: Citizens Band channel 13
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_125_000
+        name: Channel 14
+        official: Citizens Band channel 14
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_135_000
+        name: Channel 15
+        official: Citizens Band channel 15
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_155_000
+        name: Channel 16
+        official: Citizens Band channel 16
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_165_000
+        name: Channel 17
+        official: Citizens Band channel 17 - highway information, north and south
+        use: >
+          The second road channel, used on north-south highways in parts
+          of the west.
+      - hz: 27_175_000
+        name: Channel 18
+        official: Citizens Band channel 18
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_185_000
+        name: Channel 19
+        official: Citizens Band channel 19 - highway information
+        use: >
+          The truckers' channel: road conditions, traffic and accidents.
+          The busiest thing on the band anywhere near an interstate.
+      - hz: 27_205_000
+        name: Channel 20
+        official: Citizens Band channel 20
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_215_000
+        name: Channel 21
+        official: Citizens Band channel 21
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_225_000
+        name: Channel 22
+        official: Citizens Band channel 22
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_235_000
+        name: Channel 24
+        official: Citizens Band channel 24
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_245_000
+        name: Channel 25
+        official: Citizens Band channel 25
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_255_000
+        name: Channel 23
+        official: Citizens Band channel 23
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_265_000
+        name: Channel 26
+        official: Citizens Band channel 26
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_275_000
+        name: Channel 27
+        official: Citizens Band channel 27
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_285_000
+        name: Channel 28
+        official: Citizens Band channel 28
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_295_000
+        name: Channel 29
+        official: Citizens Band channel 29
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_305_000
+        name: Channel 30
+        official: Citizens Band channel 30
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_315_000
+        name: Channel 31
+        official: Citizens Band channel 31
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_325_000
+        name: Channel 32
+        official: Citizens Band channel 32
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_335_000
+        name: Channel 33
+        official: Citizens Band channel 33
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_345_000
+        name: Channel 34
+        official: Citizens Band channel 34
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_355_000
+        name: Channel 35
+        official: Citizens Band channel 35
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_365_000
+        name: Channel 36
+        official: Citizens Band channel 36 - single sideband calling
+        use: >
+          Where single-sideband operators call before moving elsewhere.
+          Set the mode to LSB to hear it as speech.
+      - hz: 27_375_000
+        name: Channel 37
+        official: Citizens Band channel 37
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_385_000
+        name: Channel 38
+        official: Citizens Band channel 38 - single sideband calling
+        use: >
+          The busiest single-sideband channel, and where long-distance
+          contacts are made. Set the mode to LSB to hear it as speech.
+      - hz: 27_395_000
+        name: Channel 39
+        official: Citizens Band channel 39
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
+      - hz: 27_405_000
+        name: Channel 40
+        official: Citizens Band channel 40
+        use: >
+          One of the forty Citizens Band channels. Anyone may use it.
 
   - name: 6 m Amateur
     start_hz: 50_000_000
@@ -62,6 +270,19 @@ bands:
     description: >
       A band for licensed amateur radio operators, who are experimenting and
       talking to each other rather than broadcasting to the public.
+    channels:
+      - hz: 50_125_000
+        name: SSB calling
+        official: 6 m SSB calling frequency
+        use: >
+          Where operators call when the band opens. Quiet for weeks, then
+          suddenly full of distant stations for an afternoon.
+      - hz: 52_525_000
+        name: FM calling
+        official: 6 m FM calling frequency
+        use: >
+          The FM meeting point on this band. Set the mode to NFM to hear
+          it.
 
   - name: FM Radio
     scan: true
@@ -101,6 +322,56 @@ bands:
     description: >
       Pilots talking to air traffic control. Quiet most of the time, with
       short bursts of speech - you will hear more near an airport.
+    channels:
+      - hz: 121_500_000
+        name: Guard
+        official: Aeronautical emergency frequency
+        use: >
+          The international aviation emergency channel. Airliners keep a
+          second radio on it, so a distress call here is heard by everyone
+          in the sky.
+      - hz: 122_750_000
+        name: Air to air
+        official: Air-to-air, fixed wing
+        use: >
+          Light aircraft talking directly to each other, away from any
+          airport.
+      - hz: 122_800_000
+        name: Unicom
+        official: Unicom / common traffic advisory
+        use: >
+          The shared channel pilots use to announce themselves at a small
+          airport with no control tower - downwind, base, final, clear of
+          the runway.
+      - hz: 122_900_000
+        name: Multicom
+        official: Multicom
+        use: >
+          Parachute jumping, crop dusting, firefighting and forestry work,
+          where there is no airport frequency to use.
+      - hz: 122_925_000
+        name: Multicom
+        official: Multicom, natural resources
+        use: >
+          Forestry, land management and pipeline patrol aircraft.
+      - hz: 123_000_000
+        name: Unicom
+        official: Unicom / common traffic advisory
+        use: >
+          The second of the small-airport channels, and the one most
+          flying clubs answer on.
+      - hz: 123_025_000
+        name: Helicopters
+        official: Air-to-air, helicopters
+        use: >
+          Helicopters talking to each other - traffic reporters, air
+          ambulances and news crews.
+      - hz: 123_450_000
+        name: Air to air
+        official: Not an assigned channel
+        use: >
+          Pilots have chatted here for decades, but it is not allocated to
+          them and officially they should not.
 
   - name: Weather Satellites
     start_hz: 137_000_000
@@ -124,6 +395,25 @@ bands:
     description: >
       Licensed amateur radio operators, often chatting through repeater
       stations that extend their range across a whole city.
+    channels:
+      - hz: 144_200_000
+        name: SSB calling
+        official: 2 m SSB calling frequency
+        use: >
+          Long-distance work on this band is done in single sideband
+          rather than FM. Set the mode to USB to hear it.
+      - hz: 145_800_000
+        name: Space station
+        official: Amateur satellite downlink
+        use: >
+          The space station and a number of small satellites transmit here
+          as they pass over, for a few minutes at a time.
+      - hz: 146_520_000
+        name: National calling
+        official: 2 m national simplex calling
+        use: >
+          Where amateurs call each other without going through a repeater.
+          The convention is to make contact and then move elsewhere.
 
   - name: Marine VHF
     scan: true
@@ -137,6 +427,399 @@ bands:
     colour: "#3a8ac9"
     description: >
       Boats talking to each other, to harbours, and to the coastguard.
+    channels:
+      - hz: 156_025_000
+        name: Channel 60
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 156_050_000
+        name: Channel 1A
+        official: Port Operations and Commercial, VTS
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_075_000
+        name: Channel 61A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 156_125_000
+        name: Channel 62A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 156_175_000
+        name: Channel 63A
+        official: Port Operations and Commercial, VTS
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_225_000
+        name: Channel 64A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 156_250_000
+        name: Channel 5A
+        official: Port Operations, VTS
+        use: >
+          Harbour traffic, and the vessel traffic service in Seattle,
+          Houston and Berwick Bay.
+      - hz: 156_275_000
+        name: Channel 65A
+        official: Port Operations
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_300_000
+        name: Channel 6
+        official: Intership Safety
+        use: >
+          Safety messages between vessels, including search and rescue
+          work with aircraft. Nothing routine is allowed on it.
+      - hz: 156_325_000
+        name: Channel 66A
+        official: Port Operations
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_350_000
+        name: Channel 7A
+        official: Commercial
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_375_000
+        name: Channel 67
+        official: Commercial
+        use: >
+          Commercial traffic, and bridge-to-bridge calls on the lower
+          Mississippi. Ship to ship only.
+      - hz: 156_400_000
+        name: Channel 8
+        official: Commercial (intership only)
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_425_000
+        name: Channel 68
+        official: Non-Commercial
+        use: >
+          Recreational boats talking to each other, and to marinas and
+          yacht clubs.
+      - hz: 156_450_000
+        name: Channel 9
+        official: Boater Calling
+        use: >
+          Where boats call each other to make contact before moving to a
+          working channel. It keeps the chatter off channel 16.
+      - hz: 156_475_000
+        name: Channel 69
+        official: Non-Commercial
+        use: >
+          Recreational boats talking to each other, and to marinas and
+          yacht clubs.
+      - hz: 156_500_000
+        name: Channel 10
+        official: Commercial
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_525_000
+        name: Channel 70
+        official: Digital Selective Calling
+        use: >
+          A digital distress and calling channel. It carries no speech at
+          all - a boat's radio sends a short data burst here that names
+          the vessel and gives its position.
+      - hz: 156_550_000
+        name: Channel 11
+        official: Commercial, VTS
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_575_000
+        name: Channel 71
+        official: Non-Commercial
+        use: >
+          Recreational boats talking to each other, and to marinas and
+          yacht clubs.
+      - hz: 156_600_000
+        name: Channel 12
+        official: Port Operations, VTS
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_625_000
+        name: Channel 72
+        official: Non-Commercial (intership only)
+        use: >
+          Recreational boats talking to each other, and to marinas and
+          yacht clubs.
+      - hz: 156_650_000
+        name: Channel 13
+        official: Intership Navigation Safety
+        use: >
+          Bridge to bridge: two ships agreeing how they will pass each
+          other. Large vessels are required to listen on it, so it is one
+          of the busiest channels near a shipping lane.
+      - hz: 156_675_000
+        name: Channel 73
+        official: Port Operations
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_700_000
+        name: Channel 14
+        official: Port Operations, VTS
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_725_000
+        name: Channel 74
+        official: Port Operations
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 156_750_000
+        name: Channel 15
+        official: Environmental (receive only)
+        use: >
+          Boats may not transmit here. It carries environmental
+          information and the older class of emergency beacon.
+      - hz: 156_775_000
+        name: Channel 75
+        official: Port Operations (low power)
+        use: >
+          A guard channel immediately below the distress channel, kept at
+          one watt so that nothing spills into it.
+      - hz: 156_800_000
+        name: Channel 16
+        official: International Distress, Safety and Calling
+        use: >
+          The emergency channel. Every ship required to carry a radio
+          listens here, and so does the Coast Guard, so it is where a
+          mayday is called and where boats hail each other first.
+      - hz: 156_825_000
+        name: Channel 76
+        official: Port Operations (low power)
+        use: >
+          A guard channel immediately above the distress channel, kept at
+          one watt so that nothing spills into it.
+      - hz: 156_850_000
+        name: Channel 17
+        official: State Control
+        use: >
+          State and local government vessels - harbour police, pilots and
+          public works boats.
+      - hz: 156_875_000
+        name: Channel 77
+        official: Port Operations (intership only)
+        use: >
+          Pilots talking to the ships they are bringing in.
+      - hz: 156_900_000
+        name: Channel 18A
+        official: Commercial
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_925_000
+        name: Channel 78A
+        official: Non-Commercial
+        use: >
+          Recreational boats talking to each other, and to marinas and
+          yacht clubs.
+      - hz: 156_950_000
+        name: Channel 19A
+        official: Commercial
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 156_975_000
+        name: Channel 79A
+        official: Commercial
+        use: >
+          Commercial traffic, and recreational boats on the Great Lakes.
+      - hz: 157_000_000
+        name: Channel 20A
+        official: Port Operations
+        use: >
+          Harbour traffic: dockings, lock and bridge openings, and the
+          vessel traffic service where a port runs one.
+      - hz: 157_025_000
+        name: Channel 80A
+        official: Commercial
+        use: >
+          Commercial traffic, and recreational boats on the Great Lakes.
+      - hz: 157_050_000
+        name: Channel 21A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 157_075_000
+        name: Channel 81A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels; this one is used
+          for environmental protection work.
+      - hz: 157_100_000
+        name: Channel 22A
+        official: Coast Guard Liaison and Maritime Safety
+        use: >
+          The Coast Guard's working channel. Safety broadcasts, weather
+          warnings and notices to mariners are read out here, announced
+          first on channel 16.
+      - hz: 157_125_000
+        name: Channel 82A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 157_150_000
+        name: Channel 23A
+        official: U.S. Government only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 157_175_000
+        name: Channel 83A
+        official: U.S. Coast Guard only
+        use: >
+          Reserved for United States government vessels, which in practice
+          means the Coast Guard.
+      - hz: 157_200_000
+        name: Channel 24
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_225_000
+        name: Channel 84
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_250_000
+        name: Channel 25
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_275_000
+        name: Channel 85
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_300_000
+        name: Channel 26
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_325_000
+        name: Channel 86
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_350_000
+        name: Channel 27
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_375_000
+        name: Channel 87
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_400_000
+        name: Channel 28
+        official: Public Correspondence
+        use: >
+          The old ship-to-shore telephone service. Mobile phones have
+          replaced almost all of it, so these are usually silent.
+      - hz: 157_425_000
+        name: Channel 88A
+        official: Commercial (intership only)
+        use: >
+          Working traffic between commercial vessels - tugs, barges,
+          ferries and fishing boats going about their business.
+      - hz: 161_600_000
+        name: Channel 20 (shore)
+        official: Port Operations
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_800_000
+        name: Channel 24 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_825_000
+        name: Channel 84 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_850_000
+        name: Channel 25 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_875_000
+        name: Channel 85 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_900_000
+        name: Channel 26 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_925_000
+        name: Channel 86 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_950_000
+        name: Channel 27 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 161_975_000
+        name: AIS 1
+        official: Automatic Identification System, channel 87B
+        use: >
+          Ships broadcasting their name, position, course and speed as
+          data rather than speech. This is where ship-tracking websites
+          get their information.
+      - hz: 162_000_000
+        name: Channel 28 (shore)
+        official: Public Correspondence
+        use: >
+          The shore half of a marine telephone channel; the ship answers
+          4.6 MHz lower down. Mostly silent now.
+      - hz: 162_025_000
+        name: AIS 2
+        official: Automatic Identification System, channel 88B
+        use: >
+          The second of the two ship position channels; vessels alternate
+          between them.
 
   - name: Weather Radio
     scan: true
@@ -151,6 +834,56 @@ bands:
     description: >
       A continuous recorded forecast for your area, broadcast around the
       clock by the national weather service.
+    channels:
+      - hz: 162_400_000
+        name: WX2
+        official: NOAA Weather Radio channel 2
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_425_000
+        name: WX4
+        official: NOAA Weather Radio channel 4
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_450_000
+        name: WX5
+        official: NOAA Weather Radio channel 5
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_475_000
+        name: WX3
+        official: NOAA Weather Radio channel 3
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_500_000
+        name: WX6
+        official: NOAA Weather Radio channel 6
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_525_000
+        name: WX7
+        official: NOAA Weather Radio channel 7
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
+      - hz: 162_550_000
+        name: WX1
+        official: NOAA Weather Radio channel 1
+        use: >
+          One of the seven weather radio channels. Your area uses
+          whichever one its nearest transmitter was given, so only one or
+          two of them will be strong.
 
   - name: Public Service
     start_hz: 162_550_000
@@ -185,6 +918,18 @@ bands:
     description: >
       Another band for licensed amateur radio operators, mostly used for
       local conversations through repeaters.
+    channels:
+      - hz: 432_100_000
+        name: SSB calling
+        official: 70 cm SSB calling frequency
+        use: >
+          The weak-signal end of the band. Set the mode to USB to hear it.
+      - hz: 446_000_000
+        name: National calling
+        official: 70 cm national simplex calling
+        use: >
+          Where amateurs call each other directly rather than through a
+          repeater.
 
   - name: Remote Controls
     start_hz: 433_050_000
@@ -210,6 +955,211 @@ bands:
     description: >
       The handheld radios sold in pairs for hiking and family use, plus the
       licensed version of the same service.
+    channels:
+      - hz: 462_550_000
+        name: Channel 15
+        official: FRS/GMRS channel 15
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_562_500
+        name: Channel 1
+        official: FRS/GMRS channel 1
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_575_000
+        name: Channel 16
+        official: FRS/GMRS channel 16
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_587_500
+        name: Channel 2
+        official: FRS/GMRS channel 2
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_600_000
+        name: Channel 17
+        official: FRS/GMRS channel 17
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_612_500
+        name: Channel 3
+        official: FRS/GMRS channel 3
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_625_000
+        name: Channel 18
+        official: FRS/GMRS channel 18
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_637_500
+        name: Channel 4
+        official: FRS/GMRS channel 4
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_650_000
+        name: Channel 19
+        official: FRS/GMRS channel 19
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_662_500
+        name: Channel 5
+        official: FRS/GMRS channel 5
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_675_000
+        name: Channel 20
+        official: FRS/GMRS channel 20 - travel and emergency
+        use: >
+          The channel licensed users call on when travelling, and the one
+          an emergency call is most likely to be heard on. Many radios
+          need a 141.3 Hz tone set before they will open their squelch
+          here.
+      - hz: 462_687_500
+        name: Channel 6
+        official: FRS/GMRS channel 6
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_700_000
+        name: Channel 21
+        official: FRS/GMRS channel 21
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 462_712_500
+        name: Channel 7
+        official: FRS/GMRS channel 7
+        use: >
+          A channel the cheap two-way radios sold in pairs share with the
+          licensed service. Half a watt from a family radio, up to five
+          from a licensed one.
+      - hz: 462_725_000
+        name: Channel 22
+        official: FRS/GMRS channel 22
+        use: >
+          A main channel of the licensed service, shared with family
+          radios. Licensed users may run 50 watts, so this is where the
+          distant conversations are.
+      - hz: 467_550_000
+        name: Repeater 15
+        official: GMRS repeater input 15
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_562_500
+        name: Channel 8
+        official: FRS channel 8
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_575_000
+        name: Repeater 16
+        official: GMRS repeater input 16
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_587_500
+        name: Channel 9
+        official: FRS channel 9
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_600_000
+        name: Repeater 17
+        official: GMRS repeater input 17
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_612_500
+        name: Channel 10
+        official: FRS channel 10
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_625_000
+        name: Repeater 18
+        official: GMRS repeater input 18
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_637_500
+        name: Channel 11
+        official: FRS channel 11
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_650_000
+        name: Repeater 19
+        official: GMRS repeater input 19
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_662_500
+        name: Channel 12
+        official: FRS channel 12
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_675_000
+        name: Repeater 20
+        official: GMRS repeater input 20
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_687_500
+        name: Channel 13
+        official: FRS channel 13
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_700_000
+        name: Repeater 21
+        official: GMRS repeater input 21
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
+      - hz: 467_712_500
+        name: Channel 14
+        official: FRS channel 14
+        use: >
+          A low-power channel for family radios only, half a watt into a
+          fixed aerial. Short range, so anything you hear is close by.
+      - hz: 467_725_000
+        name: Repeater 22
+        official: GMRS repeater input 22
+        use: >
+          The input side of a repeater: what a licensed handset transmits.
+          The repeater sends it out again 5 MHz lower down, so listen
+          there for both halves of the conversation.
 
   - name: Public Safety
     start_hz: 764_000_000
@@ -272,3 +1222,344 @@ bands:
     description: >
       A high-frequency amateur radio band, used for local links and
       experiments.
+    channels:
+      - hz: 1_294_500_000
+        name: FM calling
+        official: 23 cm FM calling frequency
+        use: >
+          The FM meeting point on this band.
+      - hz: 1_296_100_000
+        name: SSB calling
+        official: 23 cm SSB calling frequency
+        use: >
+          The weak-signal calling frequency, used for long-distance and
+          moonbounce work.
+
+# What the rest of the dial is licensed for.
+#
+# Everything above is somewhere a beginner can usefully point this receiver.
+# This second list is the opposite: it covers the gaps between those bands, so
+# that "Unallocated" can stop meaning "we have nothing to say about this" and
+# start meaning "here is who owns it, and why you cannot hear it". It is shown
+# from Standard upwards only - at Simple, a stretch of dial with nothing to
+# listen to is better left quiet than explained.
+#
+# These entries deliberately carry no mode, bandwidth or raster. Nothing tunes
+# from them, nothing scans them and the classifier does not read them; they are
+# prose, and the only code that looks at them is `official()`.
+
+allocations:
+  - name: Beacons and travellers' information
+    start_hz: 500_000
+    end_hz: 530_000
+    use: >
+      Licensed to non-directional beacons - the low, steady tones aircraft and
+      boats home in on, each identifying itself in morse - and to the
+      low-power stations that read out road and parking information near
+      airports.
+
+  - name: Long-distance fixed links
+    start_hz: 1_700_000
+    end_hz: 1_800_000
+    use: >
+      Licensed to fixed and mobile services. Some countries continue the AM
+      broadcast band up to 1710 kHz, so a station here is likely to be a
+      distant one.
+
+  - name: 160 m Amateur
+    start_hz: 1_800_000
+    end_hz: 2_000_000
+    use: >
+      Licensed to amateur radio operators. It comes alive after dark and is
+      almost silent in daylight, and most of the work here is in single
+      sideband or morse rather than AM.
+
+  - name: Maritime radio
+    start_hz: 2_000_000
+    end_hz: 2_300_000
+    use: >
+      Licensed to ships and coast stations for long-distance work, including
+      the 2182 kHz distress channel, plus fixed links.
+
+  - name: Business and broadcast links
+    start_hz: 26_100_000
+    end_hz: 26_965_000
+    use: >
+      Licensed to low-power business radio and to remote pickup units - the
+      link a radio station uses to get an outside broadcast back to the
+      studio.
+
+  - name: Business radio
+    start_hz: 27_405_000
+    end_hz: 28_000_000
+    use: >
+      Licensed to business radio, immediately above Citizens Band.
+
+  - name: 10 m Amateur
+    start_hz: 28_000_000
+    end_hz: 29_700_000
+    use: >
+      Licensed to amateur radio operators. When the sun is active this band
+      reaches around the world on a few watts; when it is not, it is empty for
+      months.
+
+  - name: VHF low band
+    start_hz: 29_700_000
+    end_hz: 50_000_000
+    use: >
+      Licensed to state police, forestry, utilities, public works and the
+      military. Signals here bend over hills rather than needing line of
+      sight, and occasionally arrive from a thousand miles away.
+
+  - name: Television 2 to 4
+    start_hz: 54_000_000
+    end_hz: 72_000_000
+    use: >
+      Licensed to broadcast television. American stations left these channels
+      when television went digital, so it is mostly empty.
+
+  - name: Marker beacons and wireless links
+    start_hz: 72_000_000
+    end_hz: 76_000_000
+    use: >
+      Licensed to aircraft marker beacons at 75 MHz, which mark the approach
+      to a runway, and to radio-controlled models, wireless microphones and
+      industrial telemetry.
+
+  - name: Television 5 and 6
+    start_hz: 76_000_000
+    end_hz: 88_000_000
+    use: >
+      Licensed to broadcast television, and almost as empty as channels 2 to 4
+      for the same reason.
+
+  - name: Guard band
+    start_hz: 117_975_000
+    end_hz: 118_000_000
+    use: >
+      Deliberately empty: a sliver kept clear between the navigation beacons
+      below and the air traffic channels above, so that neither spills into
+      the other.
+
+  - name: Federal government
+    start_hz: 138_000_000
+    end_hz: 144_000_000
+    use: >
+      Licensed to federal agencies and the military for two-way radio, along
+      with some satellite downlinks. Much of it is encrypted.
+
+  - name: Federal government
+    start_hz: 148_000_000
+    end_hz: 150_800_000
+    use: >
+      Licensed to federal agencies and the military, with a slice at 150 MHz
+      reserved for the satellites ships once navigated by.
+
+  - name: Business and public safety
+    start_hz: 150_800_000
+    end_hz: 156_000_000
+    use: >
+      Licensed to taxis, tow trucks, utilities, vets, fire departments and
+      paging transmitters. It is the busiest two-way band in the country, and
+      the traffic on it is still largely in plain FM.
+
+  - name: Federal government
+    start_hz: 162_025_000
+    end_hz: 162_400_000
+    use: >
+      Licensed to federal agencies, out of the same pool the weather radio
+      channels immediately above come from. Land management, law enforcement
+      and park services, and increasingly digital.
+
+  - name: Television 7 to 13
+    start_hz: 174_000_000
+    end_hz: 216_000_000
+    use: >
+      Licensed to broadcast television, now digital, and to the wireless
+      microphones used in theatres, churches and concert halls.
+
+  - name: Maritime and vehicle tracking
+    start_hz: 216_000_000
+    end_hz: 222_000_000
+    use: >
+      Licensed to automated maritime telecommunications along the inland
+      waterways, to vehicle location systems, and to narrowband business
+      radio.
+
+  - name: 1.25 m Amateur
+    start_hz: 222_000_000
+    end_hz: 225_000_000
+    use: >
+      Licensed to amateur radio operators. A quiet band with a scattering of
+      repeaters, popular where the 2 metre band is crowded.
+
+  - name: Federal government and satellites
+    start_hz: 400_000_000
+    end_hz: 420_000_000
+    use: >
+      Licensed to federal agencies: weather balloon telemetry around 403 MHz,
+      distress beacons at 406 MHz, satellite links and government two-way
+      radio.
+
+  - name: Business radio
+    start_hz: 450_000_000
+    end_hz: 462_500_000
+    use: >
+      Licensed to business and public safety two-way radio - shops,
+      warehouses, hospitals, security and taxi firms - much of it now digital.
+
+  - name: Business radio
+    start_hz: 467_725_000
+    end_hz: 470_000_000
+    use: >
+      The upper half of the same business band, above the walkie-talkie
+      channels.
+
+  - name: Television 14 to 36
+    start_hz: 470_000_000
+    end_hz: 608_000_000
+    use: >
+      Licensed to digital broadcast television. A station here is several
+      megahertz wide and carries no analogue sound at all, so it appears as a
+      flat block on the waterfall and nothing on the speaker.
+
+  - name: Radio astronomy
+    start_hz: 608_000_000
+    end_hz: 614_000_000
+    use: >
+      Reserved for radio telescopes and hospital telemetry. Nothing is
+      licensed to transmit here, which is the point of it.
+
+  - name: Mobile phones, 600 MHz
+    start_hz: 614_000_000
+    end_hz: 698_000_000
+    use: >
+      Licensed to mobile phone networks, which bought these channels from
+      television broadcasters. The signal is digital and spread wide.
+
+  - name: Mobile phones, 700 MHz
+    start_hz: 698_000_000
+    end_hz: 764_000_000
+    use: >
+      Licensed to mobile phone networks and, at the top end, to the national
+      public safety network.
+
+  - name: Mobile phones and trunked radio
+    start_hz: 869_000_000
+    end_hz: 902_000_000
+    use: >
+      Licensed to mobile phone networks and to the trunked radio systems taxi
+      and delivery fleets use. Both are digital.
+
+  - name: Paging control links
+    start_hz: 928_000_000
+    end_hz: 929_000_000
+    use: >
+      Licensed to the fixed links that feed paging transmitters, and to short
+      microwave hops. This is the studio side of the pager channels just
+      above.
+
+  - name: Paging and trunked radio
+    start_hz: 932_000_000
+    end_hz: 941_000_000
+    use: >
+      Licensed to paging systems and business trunked radio, along with fixed
+      links.
+
+  - name: Studio to transmitter links
+    start_hz: 941_000_000
+    end_hz: 960_000_000
+    use: >
+      Licensed to the microwave links that carry a radio station's programme
+      from its studio to its transmitter on the hill.
+
+  # Split around the aircraft tracking band at 1090 MHz, which is a band of
+  # its own. Nothing else changes across the join.
+  - name: Aircraft navigation
+    start_hz: 960_000_000
+    end_hz: 1_089_000_000
+    use: >
+      Licensed to distance-measuring beacons, which aircraft interrogate and
+      time the reply from, and to the position reports light aircraft send at
+      978 MHz. All of it is short pulses rather than speech.
+
+  - name: Aircraft navigation
+    start_hz: 1_091_000_000
+    end_hz: 1_164_000_000
+    use: >
+      Licensed to air traffic radar and to the beacons aircraft navigate by.
+      The radar interrogates aircraft just below this, at 1030 MHz, and they
+      answer on 1090 - which is the aircraft tracking band this app decodes.
+
+  - name: Satellite navigation
+    start_hz: 1_164_000_000
+    end_hz: 1_240_000_000
+    use: >
+      Licensed to the satellite navigation systems - GPS and its European,
+      Russian and Chinese equivalents. Their signals arrive below the noise
+      floor and need a receiver built for them.
+
+  - name: Air traffic radar
+    start_hz: 1_300_000_000
+    end_hz: 1_350_000_000
+    use: >
+      Licensed to the long-range radar that air traffic control sweeps the sky
+      with, which is why an aerial near an airport sees regular pulses here.
+
+  - name: Federal fixed and mobile
+    start_hz: 1_350_000_000
+    end_hz: 1_400_000_000
+    use: >
+      Licensed to military telemetry and government fixed links.
+
+  - name: Radio astronomy
+    start_hz: 1_400_000_000
+    end_hz: 1_427_000_000
+    use: >
+      Protected worldwide, because hydrogen in space emits at 1420 MHz and
+      this is the window astronomers listen to it through. No transmitting of
+      any kind is allowed.
+
+  - name: Telemetry and wireless microphones
+    start_hz: 1_427_000_000
+    end_hz: 1_518_000_000
+    use: >
+      Licensed to medical telemetry, professional wireless microphones and the
+      telemetry aircraft manufacturers send down during flight testing.
+
+  - name: Satellite telephones, downlink
+    start_hz: 1_518_000_000
+    end_hz: 1_559_000_000
+    use: >
+      Licensed to satellite telephone and data services on their way down to
+      the ground, including the safety system ships at sea rely on.
+
+  - name: Satellite navigation
+    start_hz: 1_559_000_000
+    end_hz: 1_610_000_000
+    use: >
+      Licensed to satellite navigation. This is where GPS itself transmits, at
+      1575.42 MHz.
+
+  - name: Satellite telephones, uplink
+    start_hz: 1_610_000_000
+    end_hz: 1_660_000_000
+    use: >
+      Licensed to satellite telephones talking back up to the satellite.
+      Handsets around 1620 MHz are close enough and strong enough to be heard
+      as short bursts.
+
+  - name: Radio astronomy and weather balloons
+    start_hz: 1_660_000_000
+    end_hz: 1_670_000_000
+    use: >
+      Shared between radio telescopes and the radiosondes weather balloons
+      carry aloft twice a day.
+
+  - name: Weather satellites and mobile data
+    start_hz: 1_670_000_000
+    end_hz: 1_766_000_000
+    use: >
+      Licensed to weather satellites sending down full-resolution pictures
+      around 1690 MHz, and above 1710 MHz to mobile phone handsets talking
+      back to the network.

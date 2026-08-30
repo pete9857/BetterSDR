@@ -29,6 +29,7 @@ from ..core.settings import Settings
 from ..scan.classifier import Signal
 from .aircraft_view import AircraftView
 from .discover_view import DiscoverView
+from .learn_view import LearnView
 from .levels import Level
 from .listen_view import ListenView
 
@@ -79,6 +80,13 @@ class ProblemView(QWidget):
 class MainWindow(QMainWindow):
     """The whole app."""
 
+    # The nav bar, in order, and the index of each page. Named rather than
+    # numbered at the call sites: adding Learn made a literal `1` meaning the
+    # listening screen the sort of thing that is right until it silently is
+    # not.
+    PAGES = ("Discover", "Listen", "Aircraft", "Learn")
+    DISCOVER, LISTEN, AIRCRAFT, LEARN = range(len(PAGES))
+
     def __init__(
         self,
         engine: Engine | None = None,
@@ -97,15 +105,21 @@ class MainWindow(QMainWindow):
         # result and one saved while listening land in the same list and the
         # star on either screen agrees with the other.
         self.bookmarks = bookmarks if bookmarks is not None else BookmarkStore.open()
-        # One history, for the same reason there is one bookmark store: the
-        # listening screen writes it and the Discover strip reads it, and two
-        # copies would have the strip showing a station the radio left
-        # minutes ago.
+        # One history, for the same reason there is one bookmark store: it
+        # is written wherever the radio is tuned and read back by the
+        # Recently played section, and two copies would have that section
+        # offering a station the radio left minutes ago.
         self.history = history if history is not None else History.open()
         self.view: ListenView | None = None
         self.discover: DiscoverView | None = None
         self.aircraft: AircraftView | None = None
+        self.learn = LearnView(level=level)
         self._stack: QStackedWidget | None = None
+        # Which page a reader on an article should be returned to.
+        # Recorded when they leave for the Learn screen, because Back
+        # means the control they were looking at, and by then the
+        # stack no longer knows which that was.
+        self._before_learn = self.DISCOVER
 
         root = QWidget()
         root.setObjectName("root")
@@ -131,7 +145,7 @@ class MainWindow(QMainWindow):
                 engine,
                 level=level,
                 bookmarks=self.bookmarks,
-                history=self.history,
+                settings=settings,
             )
             self.view = ListenView(
                 engine,
@@ -142,11 +156,25 @@ class MainWindow(QMainWindow):
             )
             self.aircraft = AircraftView(engine, level=level)
             self.discover.listenRequested.connect(self._listen_to)
-            self.discover.tuneRequested.connect(self._tune_to)
+            # The step buttons either side of the frequency readout walk the
+            # Discover list, so the listening screen is told what that list
+            # currently is rather than reaching across to ask. Primed here as
+            # well as connected: a scan whose results are already on screen
+            # when the user switches level, or reopens the window, has emitted
+            # its last change long before this.
+            self.discover.resultsChanged.connect(self.view.set_results)
+            self.view.set_results(self.discover.listed)
+            # Both screens with named controls on them offer the same
+            # way in, and neither knows where it goes. This is the whole
+            # crossing: a control's own name is the route to what it means.
+            self.discover.helpRequested.connect(self._explain)
+            self.view.helpRequested.connect(self._explain)
+            self.learn.backRequested.connect(self._leave_learn)
             self._stack = QStackedWidget()
             self._stack.addWidget(self.discover)
             self._stack.addWidget(self.view)
             self._stack.addWidget(self.aircraft)
+            self._stack.addWidget(self.learn)
             layout.addWidget(self._stack, 1)
 
         self.setCentralWidget(root)
@@ -198,14 +226,14 @@ class MainWindow(QMainWindow):
 
         self._nav = QButtonGroup(self)
         self._nav.setExclusive(True)
-        for index, name in enumerate(("Discover", "Listen", "Aircraft")):
+        for index, name in enumerate(self.PAGES):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.setCheckable(True)
             button.setChecked(index == 0)
             self._nav.addButton(button, index)
             layout.addWidget(button)
-        self._nav.idClicked.connect(self._show_page)
+        self._nav.idClicked.connect(self._nav_clicked)
 
         layout.addStretch(1)
 
@@ -224,7 +252,7 @@ class MainWindow(QMainWindow):
 
     def _level_changed(self, value: int) -> None:
         level = Level(value)
-        for page in (self.discover, self.view, self.aircraft):
+        for page in self._pages:
             if page is not None:
                 page.set_level(level)
         if self.settings is not None:
@@ -249,7 +277,7 @@ class MainWindow(QMainWindow):
         """
         if self._stack is None:
             return
-        pages = (self.discover, self.view, self.aircraft)
+        pages = self._pages
         for position, page in enumerate(pages):
             if page is not None and position != index:
                 page.stop()
@@ -261,6 +289,47 @@ class MainWindow(QMainWindow):
         if button is not None:
             button.setChecked(True)
 
+    @property
+    def _pages(self) -> tuple:
+        """Every page, in nav order. `None` where the radio never started."""
+        return (self.discover, self.view, self.aircraft, self.learn)
+
+    def _nav_clicked(self, index: int) -> None:
+        """A nav button, as opposed to the app switching pages on its own.
+
+        Pressing Learn always arrives at the home page, even from an article
+        that is already open. Somebody who reaches for the tab has a browsing
+        question rather than the one specific question that brought them here
+        from a control - and an article left over from twenty minutes ago is a
+        Learn tab that appears to contain one entry.
+        """
+        if index == self.LEARN:
+            self.learn.show_home()
+        self._show_page(index)
+
+    def _explain(self, topic: str) -> None:
+        """Somebody clicked the name of a control.
+
+        The page they were on is remembered first, because Back has to return
+        them to the control they were looking at. Anything else makes the
+        explanation a detour that costs them their place, which is exactly the
+        thing that stops people ever clicking the second one.
+        """
+        if self._stack is None:
+            return
+        self._before_learn = self._stack.currentIndex()
+        # Only on the way to a real article. A topic with no article behind it
+        # is a mistake caught by the tests, and the right thing to do with it
+        # at runtime is nothing at all - not to take the reader off the screen
+        # they were using and strand them on a glossary they did not ask for.
+        if self.learn.show_topic(topic, from_app=True):
+            self._show_page(self.LEARN)
+
+    def _leave_learn(self) -> None:
+        """Back, from an article that was opened from a control."""
+        target = self._before_learn
+        self._show_page(target if target != self.LEARN else self.DISCOVER)
+
     def _listen_to(self, signal: Signal) -> None:
         """Somebody pressed Listen on a card."""
         if self.view is None:
@@ -270,24 +339,8 @@ class MainWindow(QMainWindow):
         # Switch first, then apply: showing the page calls the view's start(),
         # and applying the signal before that would have the view's own
         # start-up overwrite the mode the classifier chose.
-        self._show_page(1)
+        self._show_page(self.LISTEN)
         self.view.show_signal(signal)
-
-    def _tune_to(self, entry) -> None:
-        """Somebody pressed a favourite or a recently played chip.
-
-        The same order as `_listen_to` and for the same reason: showing the
-        page runs the view's own start-up, which would otherwise overwrite
-        the mode the chip carried with the band plan's.
-        """
-        if self.view is None:
-            return
-        if self.engine is not None and self.engine.scanning:
-            self.engine.stop_scan()
-        self._show_page(1)
-        self.view.tune_to(
-            int(entry.frequency_hz), entry.mode, float(entry.bandwidth_hz)
-        )
 
     def _show_status(self) -> None:
         if self.engine is None:
@@ -322,7 +375,7 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
 
     def closeEvent(self, event) -> None:
-        for page in (self.discover, self.view, self.aircraft):
+        for page in self._pages:
             if page is not None:
                 page.stop()
         if self.view is not None:
