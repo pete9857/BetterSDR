@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core import doctor
+from ..core import doctor, native
 from ..core.bookmarks import BookmarkStore
 from ..core.engine import Engine
 from ..core.history import History
@@ -198,6 +198,14 @@ class MainWindow(QMainWindow):
         someone their dongle is "ready to use" on a screen that exists because
         it was not would be worse than saying nothing.
         """
+        # Asked before the doctor, because the doctor diagnoses how the
+        # dongle is bound to Windows - which is the wrong answer entirely
+        # when the driver itself was never loaded.
+        try:
+            native.load()
+        except native.DriverNotFoundError as exc:
+            return "BetterSDR could not load the radio driver", str(exc)
+
         diagnosis = doctor.diagnose()
         if not diagnosis.ok:
             steps = "\n".join(

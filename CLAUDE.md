@@ -617,12 +617,44 @@ docs/PLAN.md.
   and an EV certificate is the only kind that clears it from day one.
 - **A Python interpreter is signed and recognised, which is why the
   supported install is a clone and one command.** `py tools/setup.py` builds
-  the environment, installs, checks the dongle and opens the app. Nothing
-  new and unsigned is ever executed - every binary involved is either
-  Python itself or a PyPI wheel Microsoft has seen millions of times.
-  Measured: **first run about two minutes** (thirteen packages), **second
-  run 1.7 seconds**, because `already_installed()` is a real import rather
-  than a marker file.
+  the environment, installs, checks the dongle and opens the app. Every
+  binary it *runs* is either Python itself or a PyPI wheel Microsoft has
+  seen millions of times. Measured: **first run about two minutes**
+  (thirteen packages), **second run 1.7 seconds**, because
+  `already_installed()` is a real import rather than a marker file.
+- **Smart App Control blocks unsigned DLLs too, and this route is not immune
+  after all.** Corrected on 2026-08-30, from a second machine: the claim
+  above used to read "nothing new and unsigned is ever executed", which was
+  only ever true of *executables*. `rtlsdr.dll` and `pthreadVC2.dll` are
+  unsigned (`msvcr100.dll` is Microsoft-signed and fine), and a machine
+  enforcing the policy refuses them at `LoadLibrary` with **WinError 4551,
+  "An application control policy has blocked this file"** - which reached
+  the user as a bare `OSError` out of `ctypes/__init__.py` at steps 3/4 and
+  4/4, twice, because `bettersdr.core.device --info` and `bettersdr.app`
+  both load the driver as their first act. `native._open` now turns it into
+  `DriverBlockedError`, a subclass of `DriverNotFoundError` so that every
+  caller already handling an unusable driver gets the remedy for free.
+- **The difference between a machine where it loads and one where it does
+  not is usually the Mark of the Web.** This machine enforces the policy
+  (`VerifiedAndReputablePolicyState: 1`) and loads the same bytes without
+  complaint, because they arrived by `git clone` and carry no
+  `Zone.Identifier` stream; every file extracted from a downloaded ZIP does.
+  So `native._marked_from_the_web` asks, and the remedy leads with
+  `Get-ChildItem -Recurse | Unblock-File` when the answer is yes and with
+  turning Smart App Control off when it is no. **Running the terminal as
+  administrator does not help** - code integrity is enforced in the kernel
+  against every user, elevated or not - and it is worth saying in the
+  remedy, because it is the first thing anybody tries.
+- **Setup has to be safe to run again, because running it again is what
+  everybody does after it fails.** Every state a failed run can leave
+  behind is recognised in `build_environment` and repaired rather than
+  tripped over: a directory with no interpreter in it, an environment built
+  by a Python that has since been upgraded away, one that lost pip to an
+  interrupted install, and read-only files pip left behind that make
+  `rmtree` fail. `environment_version()` asks all three questions at once
+  because none of them says so on its own, and a delete that cannot happen
+  is a remedy naming the likely cause - BetterSDR still running out of the
+  environment - rather than a traceback.
 - **The setup script may import nothing that has to be installed.** It runs
   before pip does. Standard library only, and it checks the interpreter
   version itself because pip's message for a too-old Python is not one a

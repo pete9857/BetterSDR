@@ -20,6 +20,7 @@ import sys
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from .core import native
 from .core.bookmarks import BookmarkStore
 from .core.device import device_count
 from .core.engine import Engine
@@ -92,7 +93,15 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(icon)))
 
     engine: Engine | None = None
-    if device_count() > 0:
+    # A driver that will not load at all raises before any dongle can be
+    # counted. That is a reason to open the window on an explanation, the
+    # same as every other setup failure here - not to exit with a traceback
+    # a beginner has no way forward from.
+    try:
+        present = device_count() > 0
+    except native.DriverNotFoundError:
+        present = False
+    if present:
         engine = Engine(
             sample_rate=args.rate or 2_400_000,
             fft_size=args.fft or int(settings["fft_size"]),

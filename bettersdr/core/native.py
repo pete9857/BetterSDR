@@ -90,6 +90,24 @@ class DriverNotFoundError(RuntimeError):
     """The bundled driver DLLs are missing from the install."""
 
 
+class DriverBlockedError(DriverNotFoundError):
+    """Windows refused to load a bundled driver DLL.
+
+    Smart App Control is on by default on a clean Windows 11 machine and
+    refuses any binary that is neither signed by a publisher it recognises
+    nor already known to Microsoft's reputation service. Two of the three
+    files in `drivers/win-x64/` are unsigned - `rtlsdr.dll` and
+    `pthreadVC2.dll` - so this is a first-run failure on somebody else's
+    machine rather than a broken install, and the packaging note that
+    "nothing new and unsigned is ever executed" on the clone-and-run path
+    was only ever true of executables.
+
+    A subclass of `DriverNotFoundError` so that every caller which already
+    handles an unusable driver keeps working and gets the better message
+    for free.
+    """
+
+
 def _check(code: int, operation: str) -> int:
     if code < 0:
         raise RtlSdrError(code, operation)
@@ -132,6 +150,87 @@ class Library:
 _library: Library | None = None
 
 
+# What Windows reports when code integrity refuses to map a file:
+# "An application control policy has blocked this file." Smart App Control
+# and an enterprise WDAC policy both arrive as this one code.
+_POLICY_BLOCKED = 4551
+
+
+def _marked_from_the_web(path: Path) -> bool:
+    """Did this file arrive in a download rather than in a clone?
+
+    Every file extracted from a downloaded ZIP carries a `Zone.Identifier`
+    stream, and Smart App Control is markedly harsher on those - which is
+    usually the whole difference between a machine where the driver loads
+    and one where it does not. Worth asking, because clearing the mark is a
+    fix the user can apply without turning any protection off.
+    """
+    try:
+        with open(f"{path}:Zone.Identifier", "rb"):
+            return True
+    except OSError:
+        return False
+
+
+def _blocked_remedy(path: Path) -> str:
+    """Why Windows refused the file, and what the user can do about it."""
+    lines = [
+        f"Windows blocked {path.name}, which is part of the radio driver.",
+        "",
+        "This is Windows' own Smart App Control rather than a fault in",
+        "BetterSDR. It refuses files it has not seen before unless they carry",
+        "a signature it recognises, and two of the driver files do not.",
+        "",
+    ]
+    if _marked_from_the_web(path):
+        lines += [
+            "This copy came from a download, which is what Windows objects to",
+            "most. Try this first, in PowerShell, in the BetterSDR folder:",
+            "",
+            "    Get-ChildItem -Recurse | Unblock-File",
+            "",
+            "then run setup again. Getting the code with 'git clone' rather",
+            "than as a ZIP avoids this altogether.",
+        ]
+    else:
+        lines += [
+            "To see exactly which file was refused, in an administrator",
+            "PowerShell:",
+            "",
+            "    Get-WinEvent -LogName Microsoft-Windows-CodeIntegrity/Operational"
+            " -MaxEvents 40",
+            "",
+            "The only way past it is to turn Smart App Control off, under",
+            "Windows Security > App & browser control > Smart App Control",
+            "settings. Windows will not let you turn it back on afterwards",
+            "without reinstalling, so it is worth being sure.",
+        ]
+    lines += [
+        "",
+        "Running the terminal as an administrator does not help: this check",
+        "applies to administrators too.",
+    ]
+    return "\n".join(lines)
+
+
+def _open(path: Path) -> ctypes.CDLL:
+    """Load one DLL, turning Windows' refusals into something actionable.
+
+    A bare `OSError` out of `ctypes` here is a traceback in the middle of
+    the setup script, which is exactly the failure `tools/setup.py` exists
+    to prevent.
+    """
+    try:
+        return ctypes.CDLL(str(path))
+    except OSError as error:
+        if getattr(error, "winerror", None) == _POLICY_BLOCKED:
+            raise DriverBlockedError(_blocked_remedy(path)) from error
+        raise DriverNotFoundError(
+            f"{path.name} is present but Windows would not load it:\n"
+            f"    {error}"
+        ) from error
+
+
 def load(force_path: Path | None = None) -> Library:
     """Load the bundled rtlsdr.dll. Cached after the first successful call."""
     global _library
@@ -152,9 +251,9 @@ def load(force_path: Path | None = None) -> Library:
     for name in _DEPENDENCIES:
         dep = directory / name
         if dep.exists():
-            ctypes.CDLL(str(dep))
+            _open(dep)
 
-    lib = ctypes.CDLL(str(dll_path))
+    lib = _open(dll_path)
     is_fork = hasattr(lib, _FORK_MARKER)
     _bind(lib, is_fork)
 
@@ -227,6 +326,7 @@ def _bind(lib: ctypes.CDLL, is_fork: bool) -> None:
 
 
 __all__ = [
+    "DriverBlockedError",
     "DriverNotFoundError",
     "ReadCallback",
     "Library",

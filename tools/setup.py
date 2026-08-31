@@ -99,26 +99,111 @@ def check_checkout() -> int | None:
     )
 
 
-def build_environment(recreate: bool) -> int | None:
-    """Make `.venv`, or satisfy ourselves that the one there is usable."""
-    if recreate and VENV.exists():
-        say(f"    removing {VENV.name} and starting again")
-        shutil.rmtree(VENV)
+def remove_environment() -> int | None:
+    """Delete `.venv`, or explain why it could not be deleted.
 
-    if venv_python().is_file():
-        # An environment built by an interpreter that has since gone away
-        # fails in confusing ways, so ask it to speak before trusting it.
+    Every path that rebuilds goes through here. On Windows the usual reason
+    a delete fails is that something is still holding the environment open -
+    BetterSDR itself, or a shell sitting inside it - and a traceback at that
+    point tells the user nothing they can act on. pip also leaves read-only
+    files behind, which is a mode bit rather than a real problem, so those
+    are cleared and retried.
+    """
+
+    if not VENV.exists():
+        return None
+
+    def clear_readonly(function, path, _exception) -> None:
+        Path(path).chmod(0o700)
+        function(path)
+
+    try:
+        shutil.rmtree(VENV, onexc=clear_readonly)
+    except OSError as error:
+        return fail(
+            f"The environment in {VENV} could not be removed: {error}",
+            "Close BetterSDR, and any terminal that is using the environment,\n"
+            "then run this command again. If that does not help, delete the\n"
+            f"{VENV.name} folder yourself and run it again - nothing in there\n"
+            "is yours, and it is rebuilt from scratch.",
+        )
+    return None
+
+
+def environment_version() -> tuple[int, ...]:
+    """The Python version inside `.venv`, or `()` if it is not usable.
+
+    Three things are asked at once, because all three have to be true before
+    the environment can be trusted and none of them says so on its own: the
+    interpreter is still there and runs, it meets the version floor, and pip
+    survived. An interrupted first run leaves an environment that answers the
+    first question and fails the third, and the message pip gives for that is
+    not one a beginner can act on.
+    """
+    try:
         probe = subprocess.run(
-            [str(venv_python()), "-c", "import sys; print(sys.version.split()[0])"],
+            [
+                str(venv_python()),
+                "-c",
+                "import pip, sys;"
+                " print('.'.join(str(n) for n in sys.version_info[:3]))",
+            ],
             capture_output=True,
             text=True,
         )
-        if probe.returncode == 0:
+    except OSError:
+        # A file that is there and is not an interpreter - a truncated
+        # download, or a leftover from an interrupted run.
+        return ()
+    if probe.returncode != 0:
+        return ()
+    try:
+        return tuple(int(part) for part in probe.stdout.strip().split("."))
+    except ValueError:
+        return ()
+
+
+def build_environment(recreate: bool) -> int | None:
+    """Make `.venv`, or satisfy ourselves that the one there is usable.
+
+    Safe to run any number of times, and that is the point rather than a
+    convenience: the first thing anybody does after a failed setup is run it
+    again, so every state a failure can leave behind - a half-made
+    environment, one built by an interpreter that has since been upgraded
+    away, one whose files are read-only - has to be recognised here and
+    repaired rather than tripped over.
+    """
+    if recreate and VENV.exists():
+        say(f"    removing {VENV.name} and starting again")
+        code = remove_environment()
+        if code is not None:
+            return code
+
+    if venv_python().is_file():
+        version = environment_version()
+        if version >= MINIMUM_PYTHON:
+            shown = ".".join(str(part) for part in version)
             say(f"    using the environment already in {VENV.name}"
-                f" (Python {probe.stdout.strip()})")
+                f" (Python {shown})")
             return None
-        say(f"    {VENV.name} is there but does not work; rebuilding it")
-        shutil.rmtree(VENV)
+        if version:
+            shown = ".".join(str(part) for part in version)
+            wanted = ".".join(str(part) for part in MINIMUM_PYTHON)
+            say(f"    {VENV.name} was built with Python {shown} and BetterSDR"
+                f" needs {wanted}; rebuilding it")
+        else:
+            say(f"    {VENV.name} is there but is not usable; rebuilding it")
+        code = remove_environment()
+        if code is not None:
+            return code
+    elif VENV.exists():
+        # A directory with no interpreter in it is an interrupted run. It
+        # cannot be repaired in place, and building over it is how a broken
+        # environment survives every later attempt to fix it.
+        say(f"    {VENV.name} is unfinished; starting it again")
+        code = remove_environment()
+        if code is not None:
+            return code
 
     say(f"    creating {VENV.name} - this takes a few seconds")
     try:

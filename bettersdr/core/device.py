@@ -352,7 +352,12 @@ def _print_driver_report() -> native.Library | None:
     try:
         lib = native.load()
     except native.DriverNotFoundError as exc:
-        print(f"  ERROR: {exc}")
+        # The message is several lines of remedy, not a one-line fault, so
+        # it is indented as a block rather than run on after "ERROR:".
+        print("  ERROR: the radio driver could not be loaded.")
+        print()
+        for line in str(exc).splitlines():
+            print(f"  {line}" if line else "")
         return None
     print(f"  DLL          : {lib.path}")
     fork = "yes" if lib.is_blog_fork else "NO -- wrong driver!"
