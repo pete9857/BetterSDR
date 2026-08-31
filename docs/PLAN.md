@@ -414,6 +414,13 @@ checklist rather than assuming.
 
 ### Phase 5 — Packaging
 
+> **Amendment 17 replaces the third bullet and demotes the first.** The
+> SmartScreen prompt this was written for has been superseded by Smart App
+> Control, which blocks an unsigned build outright with no way past the
+> dialog. The supported route is now to clone the repository and run
+> `py tools/setup.py`. The PyInstaller build is built, checked as far as it
+> can be without starting it, and unverified.
+
 - PyInstaller **one-folder** (`--onedir`, not `--onefile`: faster startup, far fewer AV false positives).
 - Bundle blog-fork V1.4.0 x64 `rtlsdr.dll`, `libusb-1.0.dll`, `pthreadVC2.dll`, `msvcr100.dll` into `_internal/drivers/`.
 - Ship a README noting the unsigned-binary SmartScreen warning and the "More info → Run anyway" path.
@@ -2468,3 +2475,158 @@ Driven through the real widgets offscreen, with a stub engine:
   description and an article about that band are written twice, in two files,
   in the same voice. Nothing is wrong yet; they will drift.
 - **No article explains the Learn tab.** That is probably correct.
+
+---
+
+## Amendment 17 — Packaging, and a program Windows will not start (2026-08-30)
+
+### What the plan said, and what happened
+
+Phase 5 was three bullet points: a PyInstaller one-folder build, the driver
+DLLs bundled into `_internal/drivers/`, and a README noting the SmartScreen
+warning and the *More info → Run anyway* path a user clicks to get past it.
+
+The build works. The bundle is complete. The warning it was written for no
+longer exists, and what replaced it cannot be clicked past.
+
+**Smart App Control blocks the executable outright.** It is on by default on
+clean Windows 11 installs — this machine reports
+`VerifiedAndReputablePolicyState: 1` and user-mode code integrity enforced —
+and it refuses any binary that is neither signed by a publisher it recognises
+nor already vouched for by Microsoft's reputation service. A freshly built,
+unsigned PyInstaller executable is neither. The process never starts. What the
+user gets is a dialog with no way forward; what the developer gets, if they
+know to look, is this:
+
+```
+Microsoft-Windows-CodeIntegrity/Operational, event 3077
+  ...attempted to load ...\dist\BetterSDR\BetterSDR-Tools.exe that did not
+  meet the Enterprise signing level requirements or violated code integrity
+  policy (Policy ID:{0283ac0f-fff1-49ae-ada1-8a933130cad6})
+```
+
+This is not the SmartScreen reputation prompt the plan anticipated, and no
+amount of waiting fixes it. A widely distributed file can earn reputation; a
+build somebody made this morning cannot, and never will unless it is signed.
+
+### The decision
+
+**The supported way to get BetterSDR is to clone the repository and run one
+command.** `py tools/setup.py` builds the virtual environment, installs the
+dependencies, runs the driver check and opens the app; running it again later
+is how the app is started, and the second run takes 1.7 seconds.
+`BetterSDR.cmd` at the root is the same thing for somebody who would rather
+double-click than type.
+
+This works because a Python interpreter is signed and recognised, and
+everything it installs arrives as an ordinary package from PyPI — files
+Microsoft's reputation service has seen millions of times. Nothing new and
+unsigned is ever executed. The cost is a stated prerequisite: Python 3.12 or
+newer, which the setup script checks for first and explains rather than
+assumes.
+
+**The PyInstaller build stays, unverified.** `BetterSDR.spec` and
+`tools/build_app.py` are complete and produce a correct bundle; what cannot be
+established on this machine is that the bundle *starts*. It is kept because
+the work is done, because the blocking condition is a Windows policy rather
+than a defect, and because signing would clear it — an EV code-signing
+certificate, roughly $300–400 a year on a hardware token, is the only thing
+that satisfies Smart App Control from day one. That is a decision about money
+and identity, and it is the user's to make, not a packaging problem to solve.
+
+### The three ways a frozen build failed silently
+
+Every one of these produced a bundle that looked complete.
+
+- **A frozen entry script has no package around it.** `bettersdr/app.py`
+  imports its siblings relatively, and as a frozen `__main__` those resolve to
+  nothing. PyInstaller's analysis followed them without a single warning and
+  produced a 134 MB application containing **no part of BetterSDR at all** —
+  which raised `ModuleNotFoundError: No module named 'bettersdr.core'` on the
+  first line the user would have seen. The manifest check written to catch
+  exactly this class of fault passed the broken bundle, because every file it
+  knew to look for was present. Hence `packaging/bettersdr_app.py` and
+  `packaging/bettersdr_tools.py`: two-line shims that import the package
+  properly, and a build-time check that compares the modules in the bundle's
+  archive against the modules on disk.
+- **A lazily imported module is invisible to static analysis.** The console
+  tools import their command at the moment one is asked for, which keeps Qt
+  out of a driver check — and put `bettersdr.listen` beyond anything
+  PyInstaller could follow. It shipped missing from a build in which all the
+  other 70 modules were present. The spec now reads `diagnose.COMMANDS` for
+  its hidden imports rather than restating the list, so a new command cannot
+  ship as an executable that cannot find it.
+- **`sys._MEIPASS` is where a frozen build's data is, and the executable's own
+  folder is not.** `native.driver_dir()` already knew this; `hdradio` reached
+  for `Path(sys.argv[0]).parent`, which in a one-folder build is a level above
+  everything that was collected. It is now `_roots()`, a helper that exists so
+  the answer can be tested rather than inferred.
+
+### Verifying a program that cannot be run
+
+`tools/check_bundle.py` is the answer to "the executable is blocked, so how do
+we know any of this works". It unpacks the bundle's module archive over a copy
+of its data folder, recreating on disk the tree a frozen process sees, and
+then runs the application out of *that* with a bare interpreter and `-S -E`,
+so the site directory is off and nothing can quietly come from the developer's
+virtual environment instead.
+
+What it establishes, on the bundle as built:
+
+```
+ok  the whole application imports: 71 modules
+ok  dependencies load from the bundle: numpy 2.5.2, scipy 1.18.1, Qt 6.11.2
+ok  the RTL-SDR driver is found: drivers\win-x64\rtlsdr.dll
+ok  the HD Radio decoder is found: vendor\nrsc5\win-x64\nrsc5.exe
+ok  the band plan loads: 21 bands, 42 allocations
+ok  the basemap loads: 3 layers, 2403 lines, 4967 places
+ok  the glossary loads: 8 categories, 76 articles
+ok  the application icon is found: 69,716 bytes
+ok  the sound card is reachable: 37 audio devices
+ok  the window opens: 1180 x 760, with its icon
+```
+
+It does not cover the PyInstaller bootloader, and it cannot cover whether
+Windows will let the thing start. Those need a machine where the build can
+run.
+
+### Two measurements worth keeping
+
+- **The bundle is 267 MB in 428 files, and Qt is 101 MB of it.** SciPy is 48,
+  NumPy's libraries 21, SciPy's another 20, nrsc5 7, the basemap and the driver
+  under 2 between them. Qt's Mesa software OpenGL fallback alone is 20 MB and
+  is kept: a radio that shows a black window on a machine with poor graphics
+  drivers is a worse failure than a larger download. Excluding the Qt
+  subsystems the app never imports is worth having and does not move the
+  headline number, because most of what remains arrives as a dependency of
+  something that *is* used — Qt6Quick and Qt6Qml are there because the virtual
+  keyboard input plugin needs them.
+- **Smart App Control's verdict on a new file is not always immediate.** A
+  freshly written copy of `scipy/stats/_rcont/rcont.pyd` — byte-identical to
+  one that had loaded a minute earlier — was blocked on first import and
+  loaded normally on the next attempt. So a build can fail once and pass
+  afterwards for reasons that have nothing to do with the build. Worth knowing
+  before spending an afternoon on a heisenbug: it is the reputation lookup
+  catching up, and it applies to *any* binary the build has just written.
+
+### What is left
+
+- **Nobody has run the packaged executable.** Not on this machine, and not on
+  any other. The bundle is verified as far as it can be verified without
+  starting it. Anyone with a Windows machine where Smart App Control is off —
+  an in-place upgrade to Windows 11 rather than a clean install has it off —
+  can settle it by double-clicking `dist/BetterSDR/BetterSDR.exe`.
+- **The setup path has been run on one machine.** From a clean copy of the
+  checkout with the system Python 3.14.2, it built the environment, installed
+  thirteen packages, found the dongle and opened the window — but that machine
+  already had a working driver, a good network and no proxy. The failure paths
+  it writes messages for have not each been provoked.
+- **`core/installer.py` is still not written.** Amendment 1's bundled
+  `wdi-simple.exe`, which would bind WinUSB from inside the app, remains the
+  gap between "cloned the repository" and "hearing something" for a
+  first-time user. The setup script makes that gap visible rather than
+  closing it: it runs the driver check and prints the remedy.
+- **The `drivers/win-x64/` licence texts are still not in the repository.**
+  The RTL-SDR Blog release ships them and this copy does not. That is an
+  obligation on the repository as it stands, not only on a packaged build,
+  and it is the one open box in THIRD-PARTY.md.

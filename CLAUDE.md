@@ -42,7 +42,7 @@ them, who the space is licensed to - and any number of them can be
 scanned or monitored together. Driven through the real widgets
 offscreen and through the real engine against synthetic air; **not
 yet swept against a real band** |
-| **5 — Packaging** | Not started |
+| **5 — Packaging** | **Complete, by a different route than planned** (2026-08-30). The supported install is a clone and one command — `py tools/setup.py` builds the environment, installs everything, checks the dongle and opens the app; verified end to end from a clean copy of the checkout on the system Python. The PyInstaller one-folder build also ships and is complete, but **Smart App Control blocks an unsigned executable outright on Windows 11**, so it cannot be started on this machine and is **unverified**. `tools/check_bundle.py` runs the application out of the bundle to prove everything except the bootloader. See **Amendment 17** in docs/PLAN.md. |
 
 ### Driver state on this machine
 
@@ -78,6 +78,16 @@ Two things to know before working on it:
   testable only on a second machine or with explicit permission.
 
 ## Running things
+
+```bash
+# What a user runs. Builds .venv, installs, checks the dongle, opens the app;
+# a second run skips everything already done and takes about a second. Uses
+# the system Python, and only the standard library, because it is what runs
+# before anything is installed. BetterSDR.cmd is the double-click equivalent.
+py tools/setup.py
+py tools/setup.py --check       # stop after the driver check
+py tools/setup.py --recreate    # throw .venv away and build it again
+```
 
 ```bash
 .venv/Scripts/python.exe -m bettersdr.core.device --info          # driver + hardware check
@@ -586,6 +596,103 @@ the end.
   it - and none of that is a real aerial. The check is: at Expert, tick
   AM Radio and FM Radio together and scan. Both lists should be as good as
   scanning each alone, which is the whole claim.
+
+## Packaging facts
+
+Measured on this machine on 2026-08-30. Same rule as the other fact
+sections: don't re-derive them. The clone-and-run route ships and is
+verified end to end; the frozen build ships and **cannot be started on this
+machine** - see the first note. Full reasoning in **Amendment 17** of
+docs/PLAN.md.
+
+- **Smart App Control blocks an unsigned executable outright, and this is
+  the fact the whole phase turns on.** It is on by default on clean Windows
+  11 installs - this machine reports `VerifiedAndReputablePolicyState: 1`
+  with user-mode code integrity enforced - and it refuses any binary that is
+  neither signed by a recognised publisher nor already known to Microsoft's
+  reputation service. There is no *More info -> Run anyway*: the process
+  never starts, and the only explanation is event **3077** in
+  `Microsoft-Windows-CodeIntegrity/Operational`. Waiting does not help. A
+  build made this morning cannot earn reputation; only signing clears it,
+  and an EV certificate is the only kind that clears it from day one.
+- **A Python interpreter is signed and recognised, which is why the
+  supported install is a clone and one command.** `py tools/setup.py` builds
+  the environment, installs, checks the dongle and opens the app. Nothing
+  new and unsigned is ever executed - every binary involved is either
+  Python itself or a PyPI wheel Microsoft has seen millions of times.
+  Measured: **first run about two minutes** (thirteen packages), **second
+  run 1.7 seconds**, because `already_installed()` is a real import rather
+  than a marker file.
+- **The setup script may import nothing that has to be installed.** It runs
+  before pip does. Standard library only, and it checks the interpreter
+  version itself because pip's message for a too-old Python is not one a
+  beginner can act on.
+- **`pip install -e .`, and editable is a requirement rather than a
+  convenience.** `drivers/win-x64/` and `vendor/nrsc5/` sit beside the
+  package, not inside it, and are found by walking up from the package's own
+  file. A non-editable install copies the package into site-packages, where
+  there is nothing above it.
+- **A frozen entry script has no package around it.** `bettersdr/app.py`
+  imports its siblings relatively, so as a frozen `__main__` those resolve
+  to nothing - and PyInstaller's analysis follows them **without a single
+  warning**, producing a 134 MB application containing no part of BetterSDR
+  at all. `packaging/bettersdr_app.py` and `packaging/bettersdr_tools.py`
+  exist for that reason and no other.
+- **A manifest check passes a bundle that cannot import itself.** Every file
+  `tools/build_app.py` knew to look for was present in that broken build.
+  What catches it is comparing the modules *in the bundle's archive* against
+  the modules on disk, which is now what the build script does.
+- **A lazily imported module is invisible to static analysis.**
+  `diagnose.COMMANDS` names its modules as strings and imports one when it
+  is asked for, which keeps Qt out of a driver check - and shipped
+  `bettersdr.listen` missing from a build where the other 70 modules were
+  present. The spec reads that same table for its hidden imports rather than
+  restating it.
+- **`sys._MEIPASS` is where a frozen build's data is; the executable's own
+  folder is a level above it.** `native.driver_dir()` already knew;
+  `hdradio` reached for `Path(sys.argv[0]).parent` and would have found
+  nothing. It is `_roots()` now so the answer can be tested. `sys.argv[0]`
+  is also the wrong question - it is whatever the shell passed, which for a
+  shortcut can be a bare name; `sys.executable` is always a real path.
+- **Package data found with `Path(__file__).parent` needs no frozen-specific
+  code at all**, provided the spec collects it into the package's own folder
+  in the bundle. That is why the band plan, the basemap, the glossary and
+  the icon all resolve identically from a checkout, an editable install and
+  a frozen build - and why the destination in the spec is checked by a test
+  rather than trusted.
+- **The bundle is 267 MB in 428 files.** Qt 101 MB, SciPy 48, NumPy's
+  libraries 21, SciPy's 20, nrsc5 7, the basemap and the driver under 2
+  between them. Qt's Mesa software OpenGL fallback is 20 MB of that and is
+  kept: a black window on a machine with poor graphics drivers is a worse
+  failure than a larger download. Excluding the Qt subsystems the app never
+  imports does not move the headline number, because most of what is left
+  arrives as a dependency of something used - Qt6Quick and Qt6Qml are there
+  for the virtual keyboard input plugin.
+- **Smart App Control's verdict on a newly written file is not always
+  immediate.** A fresh copy of `scipy/stats/_rcont/rcont.pyd`,
+  byte-identical to one that had loaded a minute earlier, was blocked on
+  first import and loaded normally on the next attempt. So a build can fail
+  once and pass afterwards for reasons that have nothing to do with the
+  build. It is the reputation lookup catching up, and it applies to any
+  binary a build has just written.
+- **What `tools/check_bundle.py` establishes, and what it cannot.** It lays
+  the bundle's module archive over a copy of its data folder and runs the
+  application out of that with `-S -E`, so the site directory is off and
+  nothing can come from the developer's environment. All ten checks pass:
+  71 modules import, NumPy, SciPy and Qt load from the bundle, the driver
+  and nrsc5 are found, the band plan, basemap and glossary load, PortAudio
+  reports 37 devices and the window opens at 1180 x 760 wearing its icon.
+  It does not cover the PyInstaller bootloader, and it cannot cover whether
+  Windows will let it start.
+- **An ICO is a header, a directory and a run of images, and Windows wants
+  two encodings.** The small sizes go in as DIBs and 128/256 as PNG; an icon
+  carrying only one is either enormous or blurry in the places nobody checks
+  - Alt-Tab, the taskbar at 200% scaling, the Properties dialog. Nine sizes,
+  **69,716 bytes**, written by `tools/make_icon.py` with no image library:
+  PySide6 rasterises the SVG and the container is packed directly.
+- **A `QGuiApplication` that nothing holds a reference to segfaults the
+  renderer.** Rendering an SVG needs one alive, and letting it be collected
+  is not an exception - it is exit code 139 with no message.
 
 ## HF and sample-rate facts
 
@@ -1232,6 +1339,10 @@ shape: aircraft tracking is the first feature that *borrows* the radio.
 bettersdr/
   app.py          GUI entry point
   listen.py       headless tune-and-play CLI; Phase 1 acceptance test
+  diagnose.py     the console front end a packaged build needs: `check`,
+                  `listen` and `app`, each one an existing entry point. A
+                  windowed build has no stdout, so a failure before the
+                  first window has nowhere to print itself
   core/
     native.py     ctypes bindings; absolute-path DLL load; fork detection
     device.py     Device class + `--info` CLI
@@ -1330,8 +1441,29 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
                   rangepicker.py (the whole dial as tick boxes, at Expert:
                   what each stretch is labelled, what window it will really
                   be swept through, and how long the sweep will take)
+    assets/       the application's own artwork: bettersdr.ico, compiled
+                  from BetterSDRLogo.svg and committed, plus the Windows
+                  app id that stops the taskbar showing Python's icon
 drivers/win-x64/  bundled RTL-SDR Blog driver V1.4.0 (committed on purpose)
+packaging/        the two entry-point shims a frozen build needs, and
+                  nothing else. `bettersdr/app.py` imports its siblings
+                  relatively, which resolves to nothing when it *is* the
+                  frozen __main__ - so these import the package properly
+                  and hand over. Not part of the radio
+BetterSDR.spec    the PyInstaller recipe: one folder, two executables, one
+                  module archive between them
+BetterSDR.cmd     double-click front door; finds a Python and runs
+                  tools/setup.py. A script rather than a program, because
+                  Smart App Control blocks the latter
 tools/
+  setup.py        what a user runs. Standard library only - it is what runs
+                  before anything is installed
+  build_app.py    builds the packaged application and then checks what came
+                  out: every file, and every module, in the bundle
+  check_bundle.py runs the application out of the bundle with a bare
+                  interpreter, because the executable itself is blocked
+  make_icon.py    compiles ui/assets/bettersdr.ico from the logo. Run by
+                  hand; its output is committed
   build_basemap.py  compiles ui/basemap/us.bsm from Natural Earth and the
                   US Census. Run by hand; its output is committed, so nothing
                   at runtime parses a shapefile or downloads anything
@@ -1593,10 +1725,41 @@ Device control calls are serialised through a command queue consumed by the read
   behind the Discover screen accrues nothing - which is the honest reading of
   "played". `MAX_TICK_SECONDS` is what stops a minimised window coming back and
   claiming the hour.
+- **The way in is a clone and one command, not a download.** Smart App
+  Control refuses to start an unsigned program on a clean Windows 11
+  machine and offers no way past the dialog, so a downloadable `.exe` is
+  not a route a beginner can take. `py tools/setup.py` is - it uses a
+  signed interpreter and installs nothing but ordinary packages. Anything
+  added to the setup path must keep that property: the moment it writes a
+  new binary and runs it, it is back to being blocked.
+- **`tools/setup.py` may import only the standard library.** It is what
+  runs before anything is installed. This is not a style preference; an
+  import of anything else is a script that cannot run on the machine it
+  exists to set up.
+- **A frozen build's entry point is a shim, never a module of the
+  application.** `bettersdr/app.py` imports its siblings relatively, and as
+  a frozen `__main__` that resolves to nothing - silently, with the whole
+  package missing from the bundle and no warning anywhere. `packaging/`
+  holds the two shims and nothing else.
+- **Anything found by a path is found relative to the package**, with
+  `Path(__file__).parent`, and the packaging collects it into the package's
+  own folder. That one rule is why the band plan, the basemap, the glossary
+  and the icon need no frozen-specific code at all - and it is checked by
+  `tests/test_packaging.py` rather than assumed, because getting the
+  destination wrong removes a feature without removing an import.
+- **A build that reports success has written a folder, not a working
+  program.** `tools/build_app.py` checks every file *and* every module in
+  what it produced, and `tools/check_bundle.py` runs the application out of
+  the bundle. Both exist because a bundle missing the entire application
+  looked completely normal.
 - Line length 90, ruff with `E,F,I,UP,B,SIM`. Keep `ruff check .` clean.
 
 ## Git
 
-`git init` has been run. **Nothing has been committed yet** — the user has not asked for a commit. Ask before committing.
+The user commits from their editor; do not run state-changing git commands.
+Ask rather than committing.
 
 The DLLs in `drivers/win-x64/` are committed deliberately; bundling them is the whole point of the absolute-path load strategy.
+So are `vendor/nrsc5/win-x64/nrsc5.exe` and `bettersdr/ui/assets/bettersdr.ico`,
+for the same reason: what the program needs, it carries. `dist/` and `build/`
+are not - they are outputs, and both are ignored.

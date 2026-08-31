@@ -17,9 +17,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# Building the packaged application. Not needed to run it from source,
+# and deliberately not in `dev`: a test run should not require it.
+build = ["pyinstaller>=6.16"]
 
 [project.scripts]
 bettersdr = "bettersdr.app:main"
+bettersdr-tools = "bettersdr.diagnose:main"
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -33,6 +37,7 @@ bettersdr = [
     "scan/bandplan/*.yaml",
     "ui/basemap/*.bsm",
     "ui/learn/*.yaml",
+    "ui/assets/*.ico",
 ]
 
 [tool.ruff]

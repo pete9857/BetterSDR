@@ -40,10 +40,23 @@ to take the radio down with it.
 
 ## Before distributing a build
 
-- Copy the upstream licence texts for `rtlsdr.dll`, `pthreadVC2.dll` and
+Distributing the **repository** — which is how BetterSDR is meant to be
+obtained, see the README — carries none of the obligations below except the
+first. They apply to a packaged build in which the third-party libraries are
+redistributed as binaries.
+
+- ☐ Copy the upstream licence texts for `rtlsdr.dll`, `pthreadVC2.dll` and
   `msvcr100.dll` into `drivers/win-x64/` — the RTL-SDR Blog release ships them
-  and this repository currently does not.
-- Note the exact nrsc5 revision the bundled `nrsc5.exe` was built from, next to
-  a link to its source, to satisfy GPL-3 §6.
-- Package Qt as separate shared libraries (PyInstaller one-dir, not one-file),
-  which is what keeps the LGPL-3 relinking obligation straightforward.
+  and this repository currently does not. **This one applies to the repository
+  as it stands**, because those DLLs are committed here.
+- ☑ Note the exact nrsc5 revision the bundled `nrsc5.exe` was built from, next
+  to a link to its source, to satisfy GPL-3 §6 — done, in
+  `vendor/nrsc5/README.md`, and the binary itself reports the same revision
+  (`nrsc5.exe -v` prints `b7b821f`).
+- ☑ Package Qt as separate shared libraries (PyInstaller one-dir, not
+  one-file), which is what keeps the LGPL-3 relinking obligation
+  straightforward — `BetterSDR.spec` is `--onedir`, and Qt lands in
+  `dist/BetterSDR/_internal/PySide6/` as ordinary replaceable DLLs.
+- ☐ Ship the licence texts of the Python dependencies alongside a packaged
+  build. `LICENSE` and this file are collected into the bundle already; the
+  individual `*.dist-info/LICENSE` files that pip installed are not.

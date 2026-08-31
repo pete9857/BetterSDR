@@ -108,6 +108,22 @@ _TEXT_FIELDS = (
 )
 
 
+def _roots() -> list[Path]:
+    """Where `vendor/nrsc5/` might be, in the order worth looking.
+
+    Two roots, and the first expression finds two different things: in a
+    checkout it is the repository, and in a frozen build it is the bundle
+    directory the package was unpacked into, which is where the packaging
+    puts the decoder. The second is the executable's own folder, for a build
+    that lays `vendor/` beside the program instead of inside it.
+    """
+    launcher = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
+    return [
+        Path(__file__).resolve().parents[2],
+        Path(launcher).resolve().parent,
+    ]
+
+
 def executable() -> Path | None:
     """Where the bundled decoder is, or None if this build has none.
 
@@ -122,10 +138,7 @@ def executable() -> Path | None:
         return found if found.is_file() else None
     name = "nrsc5.exe" if sys.platform == "win32" else "nrsc5"
     platform = "win-x64" if sys.platform == "win32" else sys.platform
-    # The repository layout first, then the layout a frozen build has, where
-    # `vendor/` sits beside the executable rather than above the package.
-    roots = [Path(__file__).resolve().parents[2], Path(sys.argv[0]).resolve().parent]
-    for root in roots:
+    for root in _roots():
         candidate = root / "vendor" / "nrsc5" / platform / name
         if candidate.is_file():
             return candidate

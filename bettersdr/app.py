@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .core.bookmarks import BookmarkStore
@@ -24,6 +25,7 @@ from .core.device import device_count
 from .core.engine import Engine
 from .core.history import History
 from .core.settings import Settings
+from .ui.assets import declare_app_id, icon_path
 from .ui.levels import Level
 from .ui.main_window import MainWindow
 
@@ -79,8 +81,15 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(audio_device, str) and audio_device.isdigit():
         audio_device = int(audio_device)
 
+    declare_app_id()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("BetterSDR")
+    app.setApplicationDisplayName("BetterSDR")
+    icon = icon_path()
+    if icon is not None:
+        # On the application rather than the window, so every dialog and the
+        # taskbar button get it too.
+        app.setWindowIcon(QIcon(str(icon)))
 
     engine: Engine | None = None
     if device_count() > 0:
