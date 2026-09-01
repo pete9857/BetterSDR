@@ -11,36 +11,57 @@ Hopefully to inspire users to move on to more advanced hardware and software onc
 
 ## Getting started
 
-You need [Python 3.12 or newer](https://www.python.org/downloads/) — tick
-**Add python.exe to PATH** in the installer — and a copy of this repository:
+There is a step-by-step version of all of this in
+**[Getting Started.txt](Getting%20Started.txt)**, written for somebody who
+has not done it before. It is plain text so it can be read in the folder,
+before anything is installed. The short version is four steps:
+
+**1. Plug the dongle in.** A USB port on the computer itself rather than a
+hub. Windows may install its own TV-tuner driver; let it, step 3 replaces
+it.
+
+**2. Get a copy.** You need
+[Python 3.12 or newer](https://www.python.org/downloads/) — tick **Add
+python.exe to PATH** in the installer — and this repository:
 
 ```
 git clone https://github.com/pete9857/BetterSDR
 cd BetterSDR
-py tools/setup.py
 ```
 
-That one command builds a private Python environment in `.venv`, installs
-everything the radio needs, checks your dongle and opens the app. It takes a
-minute or two the first time. Running it again is how you start BetterSDR
-afterwards, and the second run takes about a second.
+**3. Assign the WinUSB driver with [Zadig](https://zadig.akeo.ie).** This is
+the step that makes the dongle work as a radio, and it is a one-off. Run
+Zadig as administrator, tick *Options → List All Devices*, choose
+**Bulk-In, Interface (Interface 0)** — interface 0, not interface 1 — check
+the target driver says **WinUSB**, and click *Replace Driver*.
 
-If you would rather not use a terminal at all, double-click **BetterSDR.cmd**
-in the folder you cloned. It does exactly the same thing.
+Interface 1 correctly stays without a driver afterwards. Picking it by
+mistake is the most common way to end up with a dongle that looks installed
+and does nothing.
+
+**4. Double-click `BetterSDR.cmd`.**
+
+The first run builds a private Python environment in `.venv`, installs what
+the radio needs, checks the dongle and opens the app; it takes a minute or
+two. Every run after that just opens the app, in about a second. That one
+file is the whole interface — there is nothing else to remember.
+
+From a terminal in the same folder, `BetterSDR` in Command Prompt or
+`.\BetterSDR` in PowerShell does the same thing, and takes the same flags:
 
 ```
-py tools/setup.py --check      check the driver and the dongle, then stop
-py tools/setup.py --update     reinstall the dependencies
-py tools/setup.py --recreate   throw the environment away and build it again
+BetterSDR.cmd --check      check the driver and the dongle, then stop
+BetterSDR.cmd --update     reinstall the dependencies
+BetterSDR.cmd --recreate   throw the environment away and build it again
+BetterSDR.cmd --dev        also install pytest and ruff
 ```
 
 ### If the dongle is not found
 
-The setup command finishes by running the driver check, and BetterSDR itself
-opens on a walkthrough rather than an error when the radio is not ready. The
-usual cause on a new machine is that Windows has bound its own TV-tuner driver
-to the dongle; the check names the remedy. You can run it on its own at any
-time:
+`BetterSDR.cmd --check` names the specific problem and the remedy, and
+BetterSDR itself opens on a walkthrough rather than an error when the radio
+is not ready. Almost always the answer is step 3, on interface 0. The same
+check is available directly once the environment exists:
 
 ```
 .venv/Scripts/python.exe -m bettersdr.core.device --info

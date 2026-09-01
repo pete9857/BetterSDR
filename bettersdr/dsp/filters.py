@@ -315,6 +315,29 @@ class BandPass(BiquadState):
         super().__init__(b, a)
 
 
+class LowPass(BiquadState):
+    """Cut everything above a corner, and nothing below it.
+
+    Written for `audio/encode.py`, where the corner is the one the broadcast
+    standard already imposed: analog FM stereo is band-limited to 15 kHz,
+    because the 19 kHz pilot has to sit above the audio. Everything a
+    demodulator hands over above that is hiss, and hiss is the single most
+    expensive thing a lossy encoder can be asked to carry - it looks like
+    signal at every frequency and there is nothing to mask it behind.
+
+    Eighth order rather than fourth. This is a band limit rather than a
+    tone control, so the shape of the skirt is the whole point of it.
+    """
+
+    def __init__(
+        self, sample_rate: float, corner_hz: float = 15_000.0, order: int = 8
+    ) -> None:
+        nyquist = sample_rate / 2.0
+        self.corner_hz = max(1.0, min(corner_hz, nyquist * 0.95))
+        b, a = butter(order, self.corner_hz, btype="low", fs=sample_rate)
+        super().__init__(b, a)
+
+
 class Deemphasis(BiquadState):
     """Undo the treble boost broadcasters apply before transmitting.
 
@@ -438,6 +461,7 @@ __all__ = [
     "Deemphasis",
     "Discriminator",
     "FirDecimator",
+    "LowPass",
     "Squelch",
     "power_dbfs",
 ]

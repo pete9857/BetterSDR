@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..audio import output
+from ..audio import output, repro
 from ..core.bookmarks import Bookmark, BookmarkStore
 from ..core.calibrate import calibrate
 from ..core.device import DEFAULT_SAMPLE_RATE
@@ -168,6 +168,39 @@ def _spin(
     if suffix:
         box.setSuffix(suffix)
     return box
+
+
+# What the two Repro-Radio caps offer, in minutes. Fixed choices rather than a
+# pair of hours-and-minutes spin boxes: two numbers per cap is four fields in a
+# 272 px column, and nobody has ever wanted a recording that runs for 1 h 47 m.
+_REPRO_CLIP_LIMITS: tuple[tuple[str, int], ...] = (
+    ("5 minutes", 5),
+    ("15 minutes", 15),
+    ("30 minutes", 30),
+    ("1 hour", 60),
+    ("2 hours", 120),
+    ("4 hours", 240),
+)
+_REPRO_SESSION_LIMITS: tuple[tuple[str, int], ...] = (
+    ("30 minutes", 30),
+    ("1 hour", 60),
+    ("2 hours", 120),
+    ("4 hours", 240),
+    ("8 hours", 480),
+    ("12 hours", 720),
+)
+
+
+def _duration(seconds: float) -> str:
+    """A length of time as somebody would say it, not as a clock shows it."""
+    whole = int(max(0.0, seconds))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 
 def _button(text: str, checkable: bool = False) -> QPushButton:
@@ -387,6 +420,7 @@ class ListenView(QWidget):
         self._build_audio_section()
         self._build_radio_section()
         self._build_recording_section()
+        self._build_repro_section()
         self._build_bookmark_section()
         self._build_history_section()
         self._build_display_section()
@@ -607,6 +641,71 @@ class ListenView(QWidget):
         self.recording_status.setWordWrap(True)
         section.add_wide(self.recording_status)
         self.recording_status.setVisible(False)
+
+    def _build_repro_section(self) -> None:
+        """Unattended recording, and songs off a broadcast station.
+
+        A section of its own rather than two more rows under Recording,
+        because the two buttons there are things you press and let go of and
+        this is a thing you leave running. The caps come first and the switch
+        last, in the order somebody actually decides them: how long am I
+        leaving this, and then, right, go.
+        """
+        section = self.panel.section("Repro-Radio", Level.STANDARD)
+
+        self.repro_clip_limit = QComboBox()
+        for caption, minutes in _REPRO_CLIP_LIMITS:
+            self.repro_clip_limit.addItem(caption, minutes)
+        self.repro_clip_limit.setToolTip(
+            "How long one file may get before the next one is started. A "
+            "single overnight file is one nothing will seek inside."
+        )
+        self.repro_clip_limit.activated.connect(self._repro_settings_changed)
+        section.add(
+            "Maximum recording time",
+            self.repro_clip_limit,
+            topic="repro-radio",
+        )
+
+        self.repro_session_limit = QComboBox()
+        for caption, minutes in _REPRO_SESSION_LIMITS:
+            self.repro_session_limit.addItem(caption, minutes)
+        self.repro_session_limit.setToolTip(
+            "How long the whole session runs before Repro-Radio switches "
+            "itself off."
+        )
+        self.repro_session_limit.activated.connect(self._repro_settings_changed)
+        section.add("Stop after", self.repro_session_limit, topic="repro-radio")
+
+        self.repro_hang = QDoubleSpinBox()
+        self.repro_hang.setRange(0.0, 30.0)
+        self.repro_hang.setSingleStep(0.5)
+        self.repro_hang.setDecimals(1)
+        self.repro_hang.setSuffix(" s")
+        self.repro_hang.setValue(repro.DEFAULT_HANG_S)
+        self.repro_hang.setToolTip(
+            "How long to keep recording after the signal stops, so a pause "
+            "in a conversation does not end up as two files."
+        )
+        self.repro_hang.valueChanged.connect(self._repro_settings_changed)
+        section.add("Hang time", self.repro_hang, Level.EXPERT, topic="repro-radio")
+
+        self.repro_songs = QCheckBox("Save songs separately")
+        self.repro_songs.setToolTip(
+            "On an FM station that sends song information, save each song as "
+            "its own file, named and tagged from what the station transmits."
+        )
+        self.repro_songs.toggled.connect(self._repro_settings_changed)
+        section.add_wide(self.repro_songs, topic="repro-songs")
+
+        self.repro_button = _button("Record everything on this frequency", True)
+        self.repro_button.toggled.connect(self._repro_toggled)
+        section.add_wide(self.repro_button, topic="repro-radio")
+
+        self.repro_status = QLabel("")
+        self.repro_status.setWordWrap(True)
+        section.add_wide(self.repro_status)
+        self.repro_status.setVisible(False)
 
     def _build_bookmark_section(self) -> None:
         section = self.panel.section("Saved frequencies", Level.STANDARD)
@@ -860,6 +959,7 @@ class ListenView(QWidget):
         # The panel shows every row that belongs at the new level, including
         # the ones this view hides for having nothing to say.
         self._refresh_recording()
+        self._refresh_repro()
         self._refresh_hd(self.engine.latest())
 
     # -- remembered settings -----------------------------------------------
@@ -901,6 +1001,19 @@ class ListenView(QWidget):
         self.stereo.setChecked(bool(settings["stereo"]))
         self.stereo_blend.setChecked(bool(settings["stereo_blend"]))
         self.hd.setChecked(bool(settings["hd"]) and self._hd_available)
+        # Repro-Radio's own switch is deliberately absent: see `settings.py`.
+        # What it should do once it is switched on is remembered; whether it
+        # is running is not.
+        self.repro_songs.setChecked(bool(settings["repro_songs"]))
+        self.repro_hang.setValue(float(settings["repro_hang_s"]))
+        for widget, key in (
+            (self.repro_clip_limit, "repro_max_clip_minutes"),
+            (self.repro_session_limit, "repro_max_session_minutes"),
+        ):
+            index = widget.findData(int(settings[key]))
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        self.engine.set_repro_settings(self._repro_settings())
 
     def remember(self) -> None:
         """Write the display choices back. Called when the window closes."""
@@ -924,6 +1037,10 @@ class ListenView(QWidget):
             stereo=self.stereo.isChecked(),
             stereo_blend=self.stereo_blend.isChecked(),
             hd=self.hd.isChecked(),
+            repro_songs=self.repro_songs.isChecked(),
+            repro_hang_s=self.repro_hang.value(),
+            repro_max_clip_minutes=self.repro_clip_limit.currentData(),
+            repro_max_session_minutes=self.repro_session_limit.currentData(),
             frequency_hz=self.frequency.value_hz,
             mode=self.mode.currentData(),
         )
@@ -1399,6 +1516,67 @@ class ListenView(QWidget):
         else:
             self.engine.stop_recording(audio=False, iq=True)
 
+    def _repro_settings(self) -> repro.ReproSettings:
+        """What the controls currently say, as the engine's own settings."""
+        return repro.ReproSettings(
+            enabled=self.repro_button.isChecked(),
+            songs=self.repro_songs.isChecked(),
+            hang_s=float(self.repro_hang.value()),
+            max_clip_s=float(self.repro_clip_limit.currentData()) * 60.0,
+            max_session_s=float(self.repro_session_limit.currentData()) * 60.0,
+        )
+
+    def _repro_settings_changed(self, *_: object) -> None:
+        self.engine.set_repro_settings(self._repro_settings())
+
+    def _repro_toggled(self, on: bool) -> None:
+        self.engine.set_repro_settings(self._repro_settings())
+        if on:
+            self.engine.start_repro()
+        else:
+            self.engine.stop_repro()
+
+    def _refresh_repro(self) -> None:
+        """Say what it is doing, and take the button back up if it stopped.
+
+        Repro-Radio ends itself when it reaches its session limit, fills the
+        disk or cannot open a file, so the button is driven from what the
+        engine reports rather than from what was last clicked - the same rule
+        as the Record audio button, and for the same reason: a control
+        claiming to be recording when it is not is worse than no control.
+        """
+        status = self.engine.repro
+        if self.repro_button.isChecked() != status.enabled:
+            self.repro_button.blockSignals(True)
+            self.repro_button.setChecked(status.enabled)
+            self.repro_button.blockSignals(False)
+
+        parts: list[str] = []
+        if status.enabled:
+            if status.recording:
+                parts.append(f"Recording {_duration(status.clip_seconds)}")
+            else:
+                parts.append("Waiting for a signal")
+            if status.session_remaining is not None:
+                parts.append(f"{_duration(status.session_remaining)} left")
+        if status.clips:
+            parts.append(f"{status.clips} files")
+        if status.songs_enabled:
+            if status.song_title:
+                parts.append(f"Song: {status.song_title}")
+            elif status.enabled:
+                parts.append("No song information yet")
+            if status.songs_saved:
+                parts.append(f"{status.songs_saved} songs kept")
+        # A middle dot rather than a hyphen: every song title on this line
+        # already contains " - ", and joining with the same thing makes the
+        # artist and the count either side of it read as one phrase.
+        text = " · ".join(parts)
+        if status.message:
+            text = f"{text}\n{status.message}" if text else status.message
+        self.repro_status.setText(text)
+        self.repro_status.setVisible(bool(text) and self.level >= Level.STANDARD)
+
     def _refresh_recording(self) -> None:
         """Follow the engine rather than assume the buttons are the truth.
 
@@ -1647,6 +1825,7 @@ class ListenView(QWidget):
             self._update_hd_badge(frame)
             self.stereo_badge.setVisible(frame.stereo)
             self._refresh_recording()
+            self._refresh_repro()
             self._update_status(frame)
             self.pager.update_state(frame.pocsag)
             # After `_update_status`, which is where `_station_name` is set

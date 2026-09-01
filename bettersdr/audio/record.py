@@ -22,6 +22,12 @@ Both recorders guard against the two ways an unattended recording ruins
 somebody's day: they stop at a size or duration limit, and they stop before
 the disk fills. **Raw IQ is 4.8 MB per second at 2.4 MS/s** - 17 GB an hour -
 so this is not a theoretical concern.
+
+That guard is `_Recorder`, and it is a base class rather than part of the WAV
+writer because `audio/encode.py` needs exactly the same one. A recorder that
+runs unattended for hours - which is the whole of Repro-Radio - is the case
+the limits were written for, and a second copy of them would be a second copy
+to get wrong.
 """
 
 from __future__ import annotations
@@ -67,11 +73,14 @@ def timestamped_name(
     return f"BetterSDR_{stamp}_{int(round(center_hz))}Hz_{kind}.{extension}"
 
 
-class _WavRecorder:
-    """Shared open/write/close, limits and the disk-space guard."""
+class _Recorder:
+    """Limits, the disk-space guard, and the numbers a status line needs.
 
-    channels = 1
-    sample_width = 2
+    Deliberately knows nothing about a file format. Duration is counted in
+    **frames**, never derived from the byte count, because a compressed
+    recording's bytes say nothing about how long it is - the one assumption a
+    WAV writer is allowed to make and an MP3 writer is not.
+    """
 
     def __init__(
         self,
@@ -83,38 +92,36 @@ class _WavRecorder:
         self.sample_rate = int(sample_rate)
         self.limits = limits or RecordingLimits()
         self.bytes_written = 0
+        self.frames_written = 0
         self.stopped_reason: str | None = None
-        self._wave: wave.Wave_write | None = None
         self._started = 0.0
         self._last_space_check = 0.0
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self) -> _WavRecorder:
+    def _prepare(self) -> bool:
+        """Make the folder and check there is room. False means do not open."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        free = shutil.disk_usage(self.path.parent).free
-        if free < self.limits.min_free_bytes:
+        if shutil.disk_usage(self.path.parent).free < self.limits.min_free_bytes:
             self.stopped_reason = "There is not enough free space to record."
-            return self
-        # Held open for the life of the recording rather than reopened per
-        # block, so it is closed by `stop` instead of by a `with`.
-        handle = wave.open(str(self.path), "wb")  # noqa: SIM115
-        handle.setnchannels(self.channels)
-        handle.setsampwidth(self.sample_width)
-        handle.setframerate(self.sample_rate)
-        self._wave = handle
+            return False
         self._started = time.monotonic()
         self._last_space_check = self._started
-        return self
+        return True
+
+    def _close(self) -> None:
+        """Release whatever the subclass opened. Must be safe to call twice."""
 
     def stop(self, reason: str | None = None) -> None:
-        if self._wave is not None:
-            self._wave.close()
-            self._wave = None
+        if self.active:
+            self._close()
         if reason is not None and self.stopped_reason is None:
             self.stopped_reason = reason
 
-    def __enter__(self) -> _WavRecorder:
+    def start(self) -> _Recorder:  # pragma: no cover - subclasses provide it
+        raise NotImplementedError
+
+    def __enter__(self) -> _Recorder:
         return self.start()
 
     def __exit__(self, *exc: object) -> None:
@@ -123,13 +130,12 @@ class _WavRecorder:
     # -- state -------------------------------------------------------------
 
     @property
-    def active(self) -> bool:
-        return self._wave is not None
+    def active(self) -> bool:  # pragma: no cover - subclasses provide it
+        raise NotImplementedError
 
     @property
     def seconds(self) -> float:
-        frame_bytes = self.channels * self.sample_width
-        return self.bytes_written / frame_bytes / self.sample_rate
+        return self.frames_written / self.sample_rate if self.sample_rate else 0.0
 
     def _over_limit(self) -> str | None:
         limits = self.limits
@@ -144,16 +150,60 @@ class _WavRecorder:
                 return "The disk is nearly full, so recording was stopped."
         return None
 
-    # -- writing -----------------------------------------------------------
-
-    def _write_bytes(self, payload: bytes) -> None:
-        if self._wave is None:
-            return
-        self._wave.writeframes(payload)
-        self.bytes_written += len(payload)
+    def _account(self, written: int, frames: int) -> None:
+        """Count what was just written, and stop if that crossed a limit."""
+        self.bytes_written += int(written)
+        self.frames_written += int(frames)
         reason = self._over_limit()
         if reason is not None:
             self.stop(reason)
+
+
+class _WavRecorder(_Recorder):
+    """Shared open/write/close for the two WAV formats."""
+
+    channels = 1
+    sample_width = 2
+
+    def __init__(
+        self,
+        path: str | Path,
+        sample_rate: int,
+        limits: RecordingLimits | None = None,
+    ) -> None:
+        super().__init__(path, sample_rate, limits)
+        self._wave: wave.Wave_write | None = None
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> _WavRecorder:
+        if not self._prepare():
+            return self
+        # Held open for the life of the recording rather than reopened per
+        # block, so it is closed by `stop` instead of by a `with`.
+        handle = wave.open(str(self.path), "wb")  # noqa: SIM115
+        handle.setnchannels(self.channels)
+        handle.setsampwidth(self.sample_width)
+        handle.setframerate(self.sample_rate)
+        self._wave = handle
+        return self
+
+    def _close(self) -> None:
+        if self._wave is not None:
+            self._wave.close()
+            self._wave = None
+
+    @property
+    def active(self) -> bool:
+        return self._wave is not None
+
+    # -- writing -----------------------------------------------------------
+
+    def _write_bytes(self, payload: bytes, frames: int) -> None:
+        if self._wave is None:
+            return
+        self._wave.writeframes(payload)
+        self._account(len(payload), frames)
 
 
 class AudioRecorder(_WavRecorder):
@@ -196,7 +246,7 @@ class AudioRecorder(_WavRecorder):
                 else block.mean(axis=1, keepdims=True)
             )
         clipped = np.clip(block, -1.0, 1.0)
-        self._write_bytes((clipped * 32767.0).astype("<i2").tobytes())
+        self._write_bytes((clipped * 32767.0).astype("<i2").tobytes(), block.shape[0])
 
 
 class IqRecorder(_WavRecorder):
@@ -216,7 +266,8 @@ class IqRecorder(_WavRecorder):
         """Queue interleaved uint8 IQ, exactly as `Device.read` returns it."""
         if self._wave is None or raw.size == 0:
             return
-        self._write_bytes(np.ascontiguousarray(raw, dtype=np.uint8).tobytes())
+        payload = np.ascontiguousarray(raw, dtype=np.uint8).tobytes()
+        self._write_bytes(payload, len(payload) // 2)
 
 
 def bytes_per_second(sample_rate: float, channels: int = 1) -> float:

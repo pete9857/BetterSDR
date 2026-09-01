@@ -2630,3 +2630,534 @@ run.
   The RTL-SDR Blog release ships them and this copy does not. That is an
   obligation on the repository as it stands, not only on a packaged build,
   and it is the one open box in THIRD-PARTY.md.
+
+
+## Amendment 18 — Zadig first, and one name to remember (2026-08-31)
+
+### What prompted it
+
+A second machine, and one sentence: *"I did the zadig steps and it solved all
+my issues right away."*
+
+Amendment 17 left the install as a clone and one command, with the driver
+treated as a problem to be *diagnosed* — `tools/setup.py` builds an
+environment, installs thirteen packages, runs the driver check, and only then,
+if the check fails, does the user meet Zadig at all. That ordering is defensible
+as engineering and indefensible as a first experience. It arranges for a
+beginner's first two minutes with the project to end in a failure, and then
+offers the actual instructions as the remedy for it.
+
+The dongle needs WinUSB on interface 0. That is true before any of the software
+exists, it takes three minutes with a tool that needs no installing, and once it
+is done everything downstream simply works. It is a step, not a fault.
+
+### The new shape
+
+Four steps, written out in **`Getting Started.txt`** at the root of the
+checkout:
+
+1. Plug the dongle in.
+2. Clone the repository (Python 3.12+ installed).
+3. Run Zadig — Options → List All Devices, **Bulk-In, Interface (Interface 0)**,
+   WinUSB, Replace Driver.
+4. Double-click **`BetterSDR.cmd`**.
+
+Three things follow from that, and each of them is a decision rather than a
+detail.
+
+**The instructions are a plain `.txt` in the checkout.** Step 3 happens before
+anything is installed, possibly before the user has looked at GitHub's rendering
+of anything, and certainly before the app can tell them anything. The only
+document that can be read at the moment it is needed is one that opens by being
+double-clicked in Explorer. Hence a text file, CRLF, with a `.gitattributes`
+that keeps it that way — and hence the README carrying the same four steps
+rather than replacing them with a link.
+
+**`BetterSDR.cmd` is the only name.** It installs the first time and starts the
+app every time after. Two names — one to install, one to run — is one more
+thing to remember than a beginner has spare, and it is the kind of distinction
+that is obvious to the person who built it and to nobody else.
+
+**The second run has to feel like a launcher.** That is the warm path in
+`setup.py`'s `main`: if the environment is there and the package imports, print
+one line and start the app. No banner, no four numbered steps, no driver check.
+An installer that reprints its progress on every launch is a launcher nobody
+believes, and the user stops reading it — which matters on the day it has
+something real to say.
+
+`installed_and_ready()` is the gate, and it is a single subprocess import. It
+answers all three questions `build_environment` asks separately — a missing
+interpreter, an environment built by a Python since upgraded away, an install
+interrupted halfway — because none of those can import the package. Anything it
+cannot answer falls through to the long path, which is the one that explains
+itself. Measured at **0.3 seconds** before the app itself starts. (`--check`
+on a warm environment takes 1.8 s, and every bit of that is the driver check
+and its capture test.)
+
+### What setup no longer claims to be
+
+It is not part of the driver story. It runs the check and reports the result,
+and when the result is bad it points at step 3 of `Getting Started.txt` rather
+than reciting a remedy of its own. `doctor.py` still carries the full Zadig
+walkthrough, because the case it exists for — skipped, or done on interface 1 —
+is still real. It is the second line of defence now instead of the first.
+
+`core/installer.py` (Amendment 1) is correspondingly less urgent. It would
+*remove* step 3, which is worth having, but it is no longer closing a gap
+between "cloned the repository" and "hearing something": step 3 closes that,
+and it closes it with a tool the user can see working. It also brings a
+signed-binary problem of its own to a project that has just spent a phase on
+exactly that.
+
+### One small thing that had nowhere else to go
+
+`Exact sample rate is: 1488375.071248 Hz`, on the console, once per HD Radio
+session.
+
+librtlsdr prints it from C whenever the RTL2832U's divider cannot hit the
+requested rate exactly. Every rate the radio normally uses is exact, so in
+practice it is the HD Radio rate and nothing else, and it says only what
+`decode/hdradio.py` already knows. It is also unreachable from Python:
+the DLL writes to file descriptor 2 directly, so `sys.stderr` never sees it and
+`contextlib.redirect_stderr` does nothing at all.
+
+`native.quiet_driver` borrows descriptor 2 for the length of the call, and
+**filters rather than mutes**. That is the whole point of it: the DLL's other
+messages are `usb_claim_interface error %d`, `No supported tuner found`,
+`Failed to submit transfer %i` — every one of them a fault worth seeing. A mute
+would have taken those with the noise, and the failure it produced would be
+silence at exactly the moment somebody needed a message. So the captured output
+is written back minus the one known-noise line, and the known-noise list is one
+line long and should stay that way.
+
+The two lines the driver prints when it opens — `Found Rafael Micro R828D
+tuner` and `RTL-SDR Blog V4 Detected` — are deliberately left alone. They are
+the driver confirming the fork detection that `native.py` exists to get right.
+
+### What is left
+
+- **Nobody has walked the four steps on a clean machine.** They were assembled
+  from a machine where step 3 was done in August and a second machine where
+  doing it fixed everything. The claim that a beginner can follow
+  `Getting Started.txt` unaided is the one that matters and the one not yet
+  tested.
+- **What Windows would have said about `--recreate` from inside the
+  environment is still unknown.** The guard was driven for real against a
+  clean copy of the checkout - it refuses, names the fix, and leaves the
+  environment where it is - but the failure it prevents was never provoked.
+- **Everything Amendment 17 left open is still open** — the packaged executable
+  is still unstarted, the setup script's failure paths are still not each
+  provoked, and `drivers/win-x64/` still lacks its licence texts.
+
+## Amendment 19 — Repro-Radio, and what a title is not enough to prove (2026-08-31)
+
+### What was asked for
+
+> When enabled, automatically record strong signals while tuned into a
+> specific frequency. Store them in a modern, lossy, highly compatible
+> compression audio file format. Use the naming convention
+> `RR-[Frequency]-[startTime]-[endTime]`. Show a "Maximum recording time"
+> feature in hours/minutes.
+>
+> When on an AM/FM frequency, have an option to record the music, and just the
+> music. Save individual songs as audio files, tagged with RDS data (excluding
+> advertisements). If duplicate songs are recorded append a number to the end
+> of the file name so the user can pick the best one to keep, since the DJ
+> might be talking over one or the other. Keep up to five copies of the same
+> song, if the song is played an additional time, don't save it.
+
+Four things were settled with the user before any of it was written: **MP3**
+rather than Opus or AAC; the **squelch with a hang time** as the gate rather
+than a threshold of its own; **two** time caps rather than one; and, on a
+station with no usable RDS, *"capture the audio, and treat it like any other
+frequency"* — which is to say song capture is an FM-with-RadioText feature and
+everything else simply gets recorded normally.
+
+### Why MP3, when Opus is better
+
+Because the question is not about the codec. Every recorder in the app until
+now has written WAV, which is what a *measurement* wants: no decisions, byte
+exact where it matters. Repro-Radio is the first thing here that is not a
+measurement — it runs unattended for hours and it fills somebody's music
+folder — so the two things that matter are that it is small enough to leave
+running overnight and that every device they own will play it without being
+told how.
+
+Opus is better per bit and AAC is better per bit. Neither shows a title in
+Windows Explorer, and one of them will not play in a car. At 128 kbps the
+encoder is nowhere near the limiting factor anyway: an FM broadcast arrives
+with 15 kHz of audio bandwidth and its own noise floor, both coarser than
+anything the codec is doing.
+
+Three properties of MP3 turned out to be load-bearing rather than incidental:
+
+- **There is no header to fix at the end.** A file is a run of frames, so a
+  recording cut short by a crash or a pulled dongle is a playable file that is
+  merely shorter than intended. That is what makes the in-progress name a
+  *rename* rather than a rewrite — and it is exactly what the WAV recorders
+  cannot do, which is why `Engine.stop` has always had to close them before
+  joining the thread.
+- **The encoder is cheap.** 6.8 ms per second of 48 kHz stereo on *noise*,
+  which is the worst case a lossy encoder can be handed. 0.7% of a core,
+  against the WFM demodulator's 6.3%, so it runs inline on the DSP thread like
+  the WAV writers with no queue and no thread of its own to get wrong.
+- **`lameenc` and `mutagen` are ordinary PyPI wheels** — a 157 KB statically
+  built LAME and a pure-Python tag library. That matters more than it sounds:
+  Amendment 17's whole conclusion was that nothing on the install path may be
+  a new unsigned binary, and a bundled `ffmpeg.exe` would have put the project
+  straight back into the Smart App Control problem it had just escaped.
+
+### The clips are the easy half
+
+While the squelch is open, write. When it closes, keep writing for a hang time
+— the gap between two overs is silence on the same channel, and a file per
+sentence is not what anybody meant. Same reasoning as the monitor's release
+timer, and the same failure if it is too short.
+
+`squelch_open` of `None` means no squelch is set, which is the normal state on
+a broadcast band. That is treated as **permanently open**: the user asked to
+record this frequency, and the honest reading of "nothing is gating this" is
+not "record nothing".
+
+Two findings from building it:
+
+**The minimum-clip guard has to measure signal, not file length.** The first
+version discarded a recording shorter than 1.5 s, which with a 3 s hang time
+could never discard anything at all — every file is at least the hang long. It
+counts how long the *gate* was open instead, at half a second, which is
+shorter than the shortest thing anybody says and longer than a click.
+`test_a_noise_burst_that_opened_the_squelch_is_thrown_away` and
+`test_a_short_transmission_is_still_a_transmission` are the two sides of it.
+
+**The per-recording cap is enforced by Repro-Radio, not by
+`RecordingLimits`.** Handing `max_seconds` to the recorder would have it stop
+itself, and then the only way to tell "roll over to the next file" from "the
+disk is filling" is to compare the message string. So the recorder's own stop
+now means exactly one thing — the size cap or the disk — and it is always
+worth reporting.
+
+`audio/record.py` grew a `_Recorder` base for the limits and the disk guard,
+because a recorder that runs unattended for hours is precisely what those were
+written for and a second copy would be a second copy to get wrong. Duration is
+counted in *frames* there rather than derived from bytes: that is the one
+assumption a WAV writer may make and an MP3 writer may not.
+
+### The songs are the hard half, and four things were wrong first
+
+A song is the stretch of broadcast between two changes of RadioText, saved
+separately and tagged. That sentence is almost entirely wrong, and each way it
+is wrong took a scenario to find.
+
+**RadioText is late, at both ends.** The station's playout updates it some
+seconds after the song starts, so a recording that began at the text change
+misses the intro of every song. The audio is therefore held in a rolling
+buffer and the boundary placed *backwards*: at the last moment the sound
+changed between speech and music if there was one, and at a fixed lag if there
+was not. The same instant ends the previous segment and begins the next, so a
+segue is cut once rather than twice and neither side is counted in both files.
+
+That is also why the song file is **not written as the audio arrives**. It is
+written from the buffer, deliberately running 25 seconds behind, so that when
+the boundary turns out to have been twenty seconds ago something can still be
+done about it. Writing in real time and trimming afterwards is not available:
+an MP3 is a stream of frames and there is no going back into one.
+
+**A change of text is not a change of song, and this was the failure that
+would have shipped silently.** A great many stations alternate their slogan
+with the title every few seconds. Treating each flip as a boundary produces
+nothing but eight-second fragments, every one below the minimum song length —
+so the feature runs, the button lights up, and nothing is ever saved. Nobody
+would report that; it looks like a station that plays no music. A song is
+therefore identified by its *tag*: the segment stays open while that same tag
+keeps coming back, and closes only when a different one is announced or the
+title has been absent for 20 seconds.
+
+**Telling the slogan from the title cannot be done one string at a time.**
+`The Best Music Variety` and `Rush - Tom Sawyer` are equally well-formed, and
+some stations' slogans parse as an artist and a title outright. Three rules
+were tried:
+
+1. *Seen three times before ⇒ the station.* Works all afternoon and then
+   quietly refuses to record the third play of somebody's favourite song —
+   which is exactly the copy the five-copies rule promised them.
+2. *Came back quickly, and its last stretch was short.* This brands the **song
+   title** on an alternating station, because there the title's stretches are
+   eight seconds too. Found by scenario, not by reading.
+3. *Has gone on turning up for longer than a song could last, and has never
+   once been left up for as long as it takes to announce one.* This is the
+   one. A slogan does both; a title can do neither. Fifteen minutes and
+   forty-five seconds, with a ten-minute absence starting the clock again so a
+   track replayed in the evening is a fresh occasion.
+
+**A title is not enough to prove a song, and this is what keeps
+advertisements out.** An advertisement break is a stretch of RadioText too,
+and `Bobs Motors - Best Deals In Town` parses perfectly. So the audio has to
+agree: `scan/voice.py` — built for the monitor, and reused here unchanged —
+reads a verdict off 0.8 s of audio once a second, and a segment is kept only
+if most of it measured as music. The two checks are independent, which is the
+whole point: an advertisement has to pass both, and it fails both. The status
+line says so in words — *"Bobs Motors - Best Deals In Town did not sound like
+music (5% of it did), so it was not kept."*
+
+### Five copies, and counting them from the folder
+
+Up to five, numbered, then nothing. The count is taken from the **filesystem**
+rather than from the index, because pruning a folder down to the best take is
+exactly what this feature expects somebody to do — and a count that did not
+notice would mean that song was never recorded again, which looks like the
+station simply not playing it.
+
+The index lives in the songs folder rather than in `%APPDATA%`, so moving the
+music folder takes its memory with it and deleting the folder resets the
+feature. A corrupt one is an empty one, same rule as `core/settings.py`: this
+is called on the DSP thread, and raising there would end an unattended session
+over a metadata problem.
+
+`key_for` folds case, accents and punctuation, and a test caught it folding
+`Guns N' Roses` to two spaces where `Guns n Roses` folds to one — which would
+have given each spelling five copies of its own. What it deliberately does not
+fold is anything in brackets: a radio edit and a live version are different
+recordings, and somebody choosing between five copies wants to be able to
+tell.
+
+### Two smaller decisions
+
+**The volume knob must not reach the file.** `dsp/chain.py` applied volume,
+mute and the limiter in one expression at the end of `process`. It is now
+`body` then `output`, and Repro-Radio taps `body` — after the AGC, before the
+volume — so an unattended session recorded at a whisper is not a folder of
+whispered files, and muting the speakers does not silently produce hours of
+zeros. The Record audio button still records `process`, because a manual
+recording is a record of a listening session and that *is* what was heard.
+
+**A borrowed radio is noticed by its silence, not by a call.** A sweep, the
+aircraft screen and a monitor session all `continue` past the audio path
+entirely, so they simply stop feeding Repro-Radio. Rather than add a line to
+each of them — and one more to remember for whatever borrows the radio next —
+`feed` treats more than two seconds without a block as an interruption and
+closes what was open, the same as a retune. The rolling buffer is why it
+matters rather than merely being tidy: it finds positions by elapsed time, so
+one left spanning an excursion would place a song boundary in audio captured
+at 1090 MHz.
+
+**The file is opened lazily**, once a segment has lasted 20 seconds. Nothing
+is lost by waiting because the audio is in the buffer either way, and it means
+a station whose text fragments writes no files at all rather than creating and
+deleting one every eight seconds — and a song refused by the five-copies rule
+never touches the disk.
+
+### What is left
+
+- **Not yet run against a real station.** Everything above was found against
+  synthetic air: four station behaviours driven end to end through the real
+  encoder, the real `voice.py` and the real state machine, plus 75 tests. None
+  of that is a broadcaster. POCSAG was in exactly this position on 2026-08-29,
+  and ADS-B's surface-versus-airborne CPR fault was invisible to every
+  synthetic test. **The check is: leave it on 94.9 for an hour with songs on,
+  and see whether the files in `Songs` are songs, whether their boundaries are
+  where the music starts, and whether any advertisement got through.**
+- **The known limitation is written down rather than hidden.** On a station
+  whose slogan *also* parses as an artist and a title, the first quarter of an
+  hour produces fragments and may keep one wrongly-named file, because until
+  the slogan has outlived a song there is no evidence separating them.
+  `test_the_station_is_only_learnt_after_a_song_has_gone_by` asserts it, so
+  changing it is a decision rather than a surprise.
+- **HD Radio carries better metadata than RDS and is not used.** `HdState`
+  already has the title and artist, from a decoder that is never wrong about
+  them. Song capture is deliberately RDS-only for now; extending it is a small
+  change to `_service_repro` and a question about what an HD session's five
+  seconds of acquisition does to a boundary.
+- **A long article can hijack the Learn search.** Adding `repro-radio` made it
+  the first result for *"what does squelch mean"*, because `search()` requires
+  every word to match and only falls back when the strict pass finds nothing —
+  so the first article long enough to contain "what", "does" and "mean"
+  monopolises every question-shaped query. Worked around by rewording the
+  article; the underlying behaviour deserves its own fix, and stopwords are
+  probably the answer.
+- **The frozen build has not been rebuilt.** `lameenc` and `mutagen` are
+  ordinary imports so PyInstaller's analysis should find them without hidden
+  imports, but that is a prediction and not a measurement, and the packaged
+  executable still cannot be started on this machine anyway.
+
+## Amendment 20 — Repro-Radio meets a real station (2026-08-31)
+
+### What was reported
+
+> The radio repo feature doesn't seem to be separating songs. It also needs to
+> not record commercials. Also the timestamps on files should be a bit cleaned
+> up, maybe more like `[month][day][hour][minute][seconds]` (all just two
+> digits).
+
+...and, once it was saving files, two more:
+
+> you've been getting the title and artist switched in the mp3 metadata
+>
+> also the mp3 files sound terrible / probably too much compression / digital
+> radio is already very compressed, i'd say look up what the broadcast
+> standard is and keep that
+
+Amendment 19 shipped this feature against synthetic stations and said so
+plainly: *"Not yet left running on a real station."* Eight minutes on 96.5 MHz
+produced one clip and no songs at all. Everything below is what a real
+broadcaster does that a synthetic one did not, and it is the same lesson
+ADS-B's surface-versus-airborne CPR fault taught on 2026-08-28.
+
+### The bug, and why every test passed
+
+`RdsState.text` is the RadioText buffer *as it stands*. RDS fills it four
+characters at a time, sixteen segments to a message, and the decoder published
+whatever was in it. Watching 96.5 for two minutes:
+
+```
+[   1.5] '96.5    k FM - The R'
+[   1.8] '96.5    k FM - The Real Slim'
+[   2.3] '96.5    k FM - The Real Slim Sha        nem'
+[   8.3] '96.5 Jack FM - The Real Slim Sha     Eminem'
+[  16.3] '96.5 Jack FM - The Real Slim Shady - Eminem'
+```
+
+Every one of those parses. Each is a different "song", so the segmenter closed
+whatever it had open and started again — several times a second, never once
+reaching `MIN_SONG_S`. The feature ran, reported nothing wrong, and saved
+nothing.
+
+The synthetic station in `tests/test_repro.py` hands over whole strings,
+because that is what a caller *thinks* RadioText is. Nothing in 75 tests could
+have caught this, and no amount of testing the segmenter would have: the fault
+is one layer down, in what the decoder claims to be offering.
+
+`RdsState.text_steady` is the fix. A display is welcome to watch a message
+fill in; anything reading it as data waits. Two things make it hard:
+
+- **A great many stations never toggle the A/B flag**, so nothing clears the
+  buffer and a shorter message leaves the tail of a longer one behind. What
+  stands in for the flag is noticing that a segment carries something
+  different from what is already stored — but only for a segment already had
+  in this pass, because on the first assembly every segment differs from the
+  spaces underneath it.
+- **Covering the last character written is not covering the message.** The
+  buffer is spaces underneath, so four segments cover everything there is. A
+  carriage return, a full sixteen-segment pass, or a segment arriving again
+  unchanged — one of the three has to say there is no more coming.
+
+### Three fields, not two
+
+96.5 transmits `96.5 Jack FM - The Real Slim Shady - Eminem`. Splitting on the
+first separator gives an artist called `96.5 Jack FM`. So the message is cut
+on *every* occurrence, the fields that are the station naming itself are
+dropped, and exactly two have to be left. Three unrecognisable fields are
+refused rather than guessed at: `A - B - C` is `Station - Title - Artist` on
+one station and `Artist - Title - Part 2` on another.
+
+Recognising the station's own field has an immediate rule and a learnt one.
+The immediate one is the dial position — the frequency the receiver is tuned
+to, which is how most US stations identify themselves, and which needs no
+history. The learnt one is a value that keeps company with too many different
+songs, and it needs a *share* as well as a count: after a second Eminem song,
+`Eminem` has two sets of companions exactly as the slogan does. What separates
+them is that the slogan is in nearly every message.
+
+### Which half is the artist
+
+The one question the string cannot answer, and the user found it before the
+learner did. Two message shapes, two conventions:
+
+- `A - B` with nothing set aside is `Artist - Title`. Near-universal.
+- `Slogan - A - B` is a station *announcing what is on* rather than labelling
+  a file, and reads the other way round — "on 96.5 Jack FM: Seven Nation Army,
+  by the White Stripes".
+
+Every message measured on the one station available puts the title first, and
+treating both shapes alike named every file on it backwards. That is a prior
+rather than a fact, so the learner can still overturn it, from the only
+evidence in the stream: an artist comes round again with a different song, and
+a title does not.
+
+### A song ends when the music stops
+
+The second live session saved `Teenage Dirtbag` twice — copy 1 and copy 2 of a
+record played once. The station had dropped its own title for 32 seconds in
+the middle of it, and `TAG_GAP_S` closed the segment on the gap alone. So the
+rule is now the title being gone **and** the music having stopped, with
+`TAG_LOST_S` as the backstop for a station that stops naming anything and
+never stops playing.
+
+Two smaller things fell out of the same session:
+
+- **A boundary must never be further back than the file already reaches.** The
+  writer runs `WRITE_LAG_S` behind and an MP3 cannot be rewound, so an older
+  boundary silently *appends* whatever came next instead of trimming it.
+- **`_sound_changed` fired on every one-second flicker.** Real music does not
+  read as music every second — twenty-seven blips of `tone` or `data` inside
+  one song — so the last change of reading is a boundary placed at random. The
+  questions are "when did this music start" and "when did it stop".
+
+### The advertisement test was measuring the wrong thing
+
+Amendment 19 kept a segment only if most of it measured as music. Raising that
+to catch advertisements was the first thing tried and it was wrong. Measured
+over a quarter of an hour, five real songs and two real breaks:
+
+| | music | speech |
+|---|---|---|
+| Notorious B.I.G. — Juicy | 0.30 | 0.05 |
+| Teenage Dirtbag | 0.53 | 0.00 |
+| Teenage Dirtbag | 0.67 | 0.03 |
+| Beck — Loser | 0.53 | 0.00 |
+| Beck — Loser | 0.46 | 0.04 |
+| advertisement break | **0.14** | **0.18** |
+| news and advertisements | **0.37** | **0.25** |
+
+The music shares overlap outright — a rap record read as music less often than
+a news bulletin did, because `scan/voice.py` calls a drum machine `data` — so
+`MIN_MUSIC_SHARE` at 0.6 refused four of the five songs. The speech shares do
+not overlap at all. `MAX_SPEECH_SHARE` is 0.10, between them with a factor of
+two either side; `MIN_MUSIC_SHARE` drops to 0.25 and stays a floor rather than
+a test. `test_the_thresholds_sit_between_what_was_measured_off_air` keeps the
+readings, so anybody raising the music threshold to catch a break finds out
+here rather than from an empty folder a week later.
+
+The real first line of defence is the text. 96.5 sends `Accident? Boohoff Law.
+Better Off With Boohoff! - 96.5 Jack FM` during a break: the station field is
+dropped, one field is left, and no song is claimed at all.
+
+### Why the files sounded bad, and what "keep the broadcast standard" means
+
+Not the bitrate on its own. **Analog FM stereo is band-limited to 15 kHz** —
+the 19 kHz pilot has to sit above the audio and the standard leaves it nowhere
+else — so everything a demodulator produces above that is hiss the transmitter
+never sent. Hiss is the single most expensive thing a lossy encoder can be
+handed: it looks like signal at every frequency and there is nothing to mask
+it behind, so the bits go there instead of on the record. At 128 kbps that was
+audible as cymbals and reverb tails turning to a warble.
+
+So the input is cut at 15 kHz first — `filters.LowPass`, flat to 14 kHz,
+−19 dB at 16–18 kHz, −50 dB above 19 kHz, because `lameenc` exposes no lowpass
+setter and LAME's own sits above the broadcast limit at every rate this uses.
+The rate then only has to carry what the broadcast contains: an HD Radio
+hybrid simulcast carries its whole digital payload in about 100 kbps of HDC
+and the local HD1 measured 92, so **160 kbps** of MP3 over a 15 kHz source is
+well clear of the thing being recorded. 20 kB a second, against the mono WAV
+recorder's 96.
+
+### Names
+
+`RR-96.500MHz-0831143012-0831143145.mp3` — month, day, hour, minute, second,
+two digits each, in **local** time. Every other timestamp the app writes is
+UTC and should stay that way; these are the one set of files a person reads a
+time off directly, and a recording made at eight in the evening that calls
+itself the next day cannot be matched to what they remember hearing. The year
+is in the file's own date. Two files landing on one name across a
+daylight-saving change are numbered by `_free_path`, which already existed for
+exactly that class of collision.
+
+### What is still not known
+
+- **A station that writes `Artist - Title` after its own slogan.** That is the
+  case the order learner exists for, and no local station does it, so the
+  learner has been driven only by tests.
+- **A station whose slogan carries no dial position.** Recognising it costs
+  two songs, and 96.5 puts its frequency in every message.
+- **Whether `text_steady` ever refuses a station outright.** A broadcaster
+  that sends neither a terminator, nor sixteen segments, nor a repeat would
+  never settle — none was found, but none was looked for beyond one station.

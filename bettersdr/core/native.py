@@ -12,8 +12,12 @@ it is not the Blog fork.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import os
 import sys
+import tempfile
+from collections.abc import Iterator
 from ctypes import (
     CFUNCTYPE,
     POINTER,
@@ -112,6 +116,66 @@ def _check(code: int, operation: str) -> int:
     if code < 0:
         raise RtlSdrError(code, operation)
     return code
+
+
+# --------------------------------------------------------------------------
+# The driver's own output
+# --------------------------------------------------------------------------
+
+# librtlsdr writes this from C whenever the RTL2832U's divider cannot hit
+# the rate it was handed exactly. Every rate the radio normally uses is
+# exact, so in practice it is the HD Radio rate and nothing else - and it
+# arrives on the console once per HD session saying only what
+# `decode/hdradio.py` already knows. Everything else the DLL prints is a
+# real fault, so this list is one line long and should stay that way.
+_DRIVER_NOISE = ("Exact sample rate is:",)
+
+
+@contextlib.contextmanager
+def quiet_driver() -> Iterator[None]:
+    """Drop librtlsdr's routine chatter, keeping anything unexpected.
+
+    The DLL writes to the process's stderr through its own C runtime, so
+    replacing `sys.stderr` does nothing at all - the only thing that
+    reaches it is file descriptor 2. So descriptor 2 is pointed at a
+    temporary file for the length of the call, and everything written to
+    it that is not on the known-noise list is written back afterwards.
+    Filtering rather than muting is the point: a driver fault during
+    these few milliseconds still reaches the user, a few milliseconds
+    late.
+
+    Descriptor 2 is process-wide, so another thread printing at exactly
+    the wrong moment has its output delayed by the length of one device
+    call. That is the cost of the C runtime not offering anything
+    narrower, and it is paid only around the calls that are known to be
+    chatty.
+
+    Does nothing at all where there is no descriptor 2 to borrow, which
+    is a windowed build started from a shortcut.
+    """
+    try:
+        saved = os.dup(2)
+    except OSError:
+        yield
+        return
+
+    try:
+        with tempfile.TemporaryFile() as capture:
+            os.dup2(capture.fileno(), 2)
+            try:
+                yield
+            finally:
+                os.dup2(saved, 2)
+            capture.seek(0)
+            kept = b"".join(
+                line
+                for line in capture.readlines()
+                if not any(line.strip().startswith(n.encode()) for n in _DRIVER_NOISE)
+            )
+        if kept:
+            os.write(saved, kept)
+    finally:
+        os.close(saved)
 
 
 # --------------------------------------------------------------------------
@@ -335,5 +399,6 @@ __all__ = [
     "byref",
     "driver_dir",
     "load",
+    "quiet_driver",
     "_check",
 ]

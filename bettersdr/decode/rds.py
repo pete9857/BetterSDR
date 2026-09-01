@@ -506,6 +506,10 @@ class RdsState:
     station: str = ""
     station_steady: bool = False
     text: str = ""
+    # Whether the whole of that message has arrived, or it is still being
+    # assembled. Anything reading the text as *data* - the song segmenter -
+    # must wait for this; a display showing it fill in need not.
+    text_steady: bool = False
     pty: int | None = None
     pty_name: str = ""
     traffic_program: bool = False
@@ -567,6 +571,16 @@ class RdsDecoder:
         self._name_steady = False
         self._text = bytearray(b" " * 64)
         self._text_flag: bool | None = None
+        # Which segments of the message on the air have arrived, as a bit
+        # per segment; how many characters each of them carries; and whether
+        # one has come round a second time, which is how a station that sends
+        # neither a carriage return nor all sixteen segments says it has
+        # finished. The tally is cleared the moment a segment we have already
+        # had turns up carrying something different, because that is a *new*
+        # message arriving over the top of the old one. See `_settled`.
+        self._text_have = 0
+        self._text_span = 4
+        self._text_wrapped = False
 
     def update(self, blocks: tuple[int, ...], valid: tuple[bool, ...]) -> None:
         a, b, c, d = blocks
@@ -625,37 +639,112 @@ class RdsDecoder:
             # short one.
             self._text_flag = flag
             self._text[:] = b" " * 64
+            self._text_have = 0
+            self._text_wrapped = False
         segment = b & 0xF
         if version_b:
             # Version B has no room for block C's two characters - it repeats
             # the station identifier there instead - so the message is half
             # the length and arrives two characters at a time.
+            self._text_span = 2
             if valid[3]:
-                self._text_char(segment * 2, d >> 8)
-                self._text_char(segment * 2 + 1, d & 0xFF)
+                self._note(segment, self._text_chars(segment * 2, d))
             return
+        self._text_span = 4
+        changed = False
         if valid[2]:
-            self._text_char(segment * 4, c >> 8)
-            self._text_char(segment * 4 + 1, c & 0xFF)
+            changed = self._text_chars(segment * 4, c)
         if valid[3]:
-            self._text_char(segment * 4 + 2, d >> 8)
-            self._text_char(segment * 4 + 3, d & 0xFF)
+            changed = self._text_chars(segment * 4 + 2, d) or changed
+        if valid[2] and valid[3]:
+            self._note(segment, changed)
 
-    def _text_char(self, index: int, byte: int) -> None:
-        if index < len(self._text):
-            self._text[index] = byte
+    def _text_chars(self, index: int, word: int) -> bool:
+        """Write two characters. True where either was not already there."""
+        changed = False
+        for offset, byte in ((0, word >> 8), (1, word & 0xFF)):
+            at = index + offset
+            if at < len(self._text):
+                changed = changed or self._text[at] != byte
+                self._text[at] = byte
+        return changed
+
+    def _note(self, segment: int, changed: bool) -> None:
+        """Record that a whole segment arrived, and whether it was news.
+
+        A great many stations never toggle the A/B flag - 96.5 MHz here does
+        not - so a shorter message arriving over a longer one leaves the tail
+        of the old one behind and the two read as one string. Noticing that a
+        segment carries something different is what stands in for the flag:
+        everything gathered before it describes the message being replaced,
+        so the tally starts again and the text is not trusted until a whole
+        pass of the new one has arrived.
+
+        Only a segment we have *already had* in this pass counts as news. On
+        the first assembly of any message every segment carries something
+        different from the spaces underneath it, so resetting on that would
+        clear the tally sixteen times running and no message would ever be
+        called whole.
+        """
+        bit = 1 << segment
+        if self._text_have & bit:
+            if changed:
+                self._text_have = 0
+                self._text_wrapped = False
+            else:
+                # Round again with nothing new in it: whatever the station is
+                # sending, it has now sent all of it at least once.
+                self._text_wrapped = True
+        self._text_have |= bit
+
+    def _settled(self) -> bool:
+        """Whether the whole of the message on the air has arrived.
+
+        The segments have to run unbroken from zero and reach the end of the
+        message - the carriage return where there is one, and otherwise the
+        last character anybody wrote. Anything short of that is a half-built
+        string, and a half-built string parses: `96.5 Jack FM - The R` is a
+        perfectly well-formed artist and title, and a song segmenter fed one
+        of those per group starts a new song several times a second and
+        finishes none of them.
+        """
+        run = 0
+        while run < 16 and self._text_have & (1 << run):
+            run += 1
+        if run == 0:
+            return False
+        # The terminator has to be looked for in the bytes, not in the
+        # decoded string: `_character` turns everything outside the printable
+        # range into a space, carriage return included, so by the time there
+        # is a string to search the end of the message is gone.
+        end = self._text.find(0x0D)
+        text = "".join(_character(byte) for byte in self._text)
+        needed = end + 1 if end >= 0 else len(text.rstrip())
+        if run * self._text_span < needed:
+            return False
+        # Reaching the last character written is not the same as reaching the
+        # end of the message: the buffer is spaces underneath, so the first
+        # four segments of `96.5 Jack FM - The Real Slim Shady - Eminem` cover
+        # every character there is and read as the complete `96.5 Jack FM - T`.
+        # Something has to say there is no more coming - the carriage return
+        # that ends a message, a whole pass of sixteen segments, or a segment
+        # arriving a second time with nothing new in it.
+        return end >= 0 or run == 16 or self._text_wrapped
 
     def snapshot(self, synced: bool, ok: int, bad: int) -> RdsState:
         text = "".join(_character(byte) for byte in self._text)
         # A carriage return ends the message; everything after it is padding
-        # the station never meant anybody to read.
-        end = text.find("\r")
+        # the station never meant anybody to read. Found in the bytes for the
+        # same reason as in `_settled`: the decoder has already turned it into
+        # a space by the time the string exists.
+        end = self._text.find(0x0D)
         return RdsState(
             pi=self.pi,
             callsign=None if self.pi is None else callsign(self.pi),
             station="".join(_character(byte) for byte in self._name),
             station_steady=self._name_steady,
             text=(text if end < 0 else text[:end]).rstrip(),
+            text_steady=self._settled(),
             pty=self.pty,
             pty_name="" if self.pty is None else PTY_NAMES[self.pty],
             traffic_program=self.traffic_program,

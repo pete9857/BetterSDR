@@ -280,3 +280,68 @@ def test_every_step_survives_being_run_twice(sandbox, monkeypatch, capsys):
     assert setup.main(["--check"]) == 0
     assert _FakeBuilder.created == [sandbox]
     assert "already installed" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# The warm path: after the first run this is a launcher, not an installer
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def warm(sandbox, monkeypatch):
+    """An environment that is already installed, and a launch we can see."""
+    _make_usable(sandbox)
+    monkeypatch.setattr(setup, "already_installed", lambda: True)
+    launches: list[int] = []
+    monkeypatch.setattr(setup, "launch", lambda: launches.append(1) or 0)
+    return launches
+
+
+def test_an_installed_environment_goes_straight_to_the_app(warm, capsys):
+    """Double-clicking BetterSDR.cmd has to open the radio, not report news."""
+    assert setup.main([]) == 0
+    assert warm == [1]
+    assert _FakeBuilder.created == []
+
+    printed = capsys.readouterr().out
+    assert "Starting BetterSDR" in printed
+    assert "BetterSDR setup" not in printed
+
+
+def test_the_warm_path_still_answers_check_and_starts_nothing(warm, monkeypatch):
+    monkeypatch.setattr(setup, "check_radio", lambda: 1)
+    assert setup.main(["--check"]) == 1
+    assert warm == []
+
+
+def test_asking_to_rebuild_takes_the_long_way_round(warm, monkeypatch, capsys):
+    """--update and friends are about the environment, so they must see it."""
+    monkeypatch.setattr(setup, "environment_version", lambda: (3, 14, 5))
+    monkeypatch.setattr(setup, "install", lambda dev: None)
+    monkeypatch.setattr(setup, "check_radio", lambda: 0)
+
+    assert setup.main(["--update", "--no-launch"]) == 0
+    assert warm == []
+    assert "BetterSDR setup" in capsys.readouterr().out
+
+
+def test_a_half_installed_environment_is_not_taken_for_a_warm_one(
+    sandbox, monkeypatch
+):
+    """The probe is a real import, so an interrupted install falls through."""
+    _make_usable(sandbox)
+    monkeypatch.setattr(setup, "already_installed", lambda: False)
+    assert setup.installed_and_ready() is False
+
+
+def test_the_environment_cannot_be_deleted_by_the_python_inside_it(
+    sandbox, monkeypatch, capsys
+):
+    """Windows will not allow it, and the error it gives says nothing."""
+    inside = sandbox / "Scripts" / "python.exe"
+    _make_usable(sandbox)
+    monkeypatch.setattr(setup.sys, "executable", str(inside))
+
+    assert setup.remove_environment() == 1
+    assert sandbox.exists()
+    assert "inside the environment" in capsys.readouterr().out

@@ -123,6 +123,17 @@ DEFAULTS: dict[str, Any] = {
     # heard talking on. Off by default: a list that starts empty because a
     # filter is on is the one failure this screen cannot afford.
     "monitor_voice_only": False,
+    # Repro-Radio. There is deliberately no key for whether it was *running*:
+    # it writes files unattended, and an app that starts recording on its own
+    # because of something somebody did last week is the kind of surprise
+    # this one has spent a phase avoiding - the same reasoning as the bias
+    # tee. What is remembered is how it should behave once switched on, which
+    # is a set of preferences somebody tuned to their own band and would
+    # otherwise have to find again every time.
+    "repro_songs": False,
+    "repro_hang_s": 3.0,
+    "repro_max_clip_minutes": 60,
+    "repro_max_session_minutes": 240,
 }
 
 

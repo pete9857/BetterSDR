@@ -183,7 +183,12 @@ class Device:
 
     @sample_rate.setter
     def sample_rate(self, hz: int) -> None:
-        self._call("rtlsdr_set_sample_rate", c_uint32(int(hz)))
+        # The only chatty call in the driver: it reports the rate it
+        # actually achieved on stderr whenever that is not the rate it was
+        # asked for, which for us means the HD Radio rate. See
+        # `native.quiet_driver` - real faults still come through.
+        with native.quiet_driver():
+            self._call("rtlsdr_set_sample_rate", c_uint32(int(hz)))
 
     @property
     def freq_correction_ppm(self) -> int:

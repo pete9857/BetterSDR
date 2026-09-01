@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from bettersdr.decode.rds import (
+    RdsDecoder,
     RdsReceiver,
     block_offset,
     callsign,
@@ -293,3 +294,81 @@ def test_a_station_that_keeps_its_name_still_uses_it():
     state = _receive(mpx(_program_service_groups(0x54A8, "SteadyFM"))).snapshot()
     assert state.station_steady
     assert state.name == "SteadyFM"
+
+
+# -- a message that has only half arrived ------------------------------------
+#
+# `RdsState.text` is the buffer as it stands, which is right for a display and
+# poison for anything reading it as data. 96.5 MHz here assembles
+# `96.5 Jack FM - The Real Slim Shady - Eminem` four characters at a time, and
+# every state on the way is a well-formed artist and title: `96.5 k FM - The
+# R`, then `...The Real Slim`, then `...Sha`. A song segmenter handed those
+# starts a new song several times a second and finishes none of them.
+
+
+def _feed_text(decoder, text: str, segments=range(16), pty: int = 10) -> None:
+    """Push 2A groups for the given segments of a 64-character message."""
+    padded = f"{text:<64.64s}"
+    for segment in segments:
+        chunk = padded[segment * 4 : segment * 4 + 4]
+        b = (2 << 12) | (0 << 11) | (1 << 10) | (pty << 5) | segment
+        decoder.update(
+            (
+                0x1234,
+                b,
+                (ord(chunk[0]) << 8) | ord(chunk[1]),
+                (ord(chunk[2]) << 8) | ord(chunk[3]),
+            ),
+            (True, True, True, True),
+        )
+
+
+def test_a_half_assembled_message_is_not_called_steady():
+    decoder = RdsDecoder()
+    _feed_text(decoder, "96.5 Jack FM - The Real Slim Shady - Eminem", range(4))
+    state = decoder.snapshot(True, 0, 0)
+    # The display is welcome to show it filling in...
+    assert state.text.startswith("96.5 Jack FM")
+    # ...but nothing may read it as a song yet.
+    assert not state.text_steady
+
+
+def test_a_whole_message_is_steady():
+    decoder = RdsDecoder()
+    message = "96.5 Jack FM - The Real Slim Shady - Eminem"
+    _feed_text(decoder, message)
+    state = decoder.snapshot(True, 0, 0)
+    assert state.text == message
+    assert state.text_steady
+
+
+def test_a_shorter_message_over_a_longer_one_is_not_steady_until_it_is_whole():
+    """96.5 MHz never toggles the A/B flag, so nothing clears the buffer.
+
+    A shorter message arriving over a longer one leaves the tail of the old
+    one behind - `Playing What We Want         Shady - Eminem` was read off
+    air - and that reads as a song too. Noticing that a segment carries
+    something different is what stands in for the flag the station is not
+    sending.
+    """
+    decoder = RdsDecoder()
+    _feed_text(decoder, "96.5 Jack FM - The Real Slim Shady - Eminem")
+    assert decoder.snapshot(True, 0, 0).text_steady
+
+    _feed_text(decoder, "Playing What We Want", range(6))
+    state = decoder.snapshot(True, 0, 0)
+    assert "Eminem" in state.text
+    assert not state.text_steady
+
+    _feed_text(decoder, "Playing What We Want")
+    state = decoder.snapshot(True, 0, 0)
+    assert state.text == "Playing What We Want"
+    assert state.text_steady
+
+
+def test_a_message_that_ends_in_a_carriage_return_needs_no_padding():
+    decoder = RdsDecoder()
+    _feed_text(decoder, "Rush - Tom Sawyer\r", range(5))
+    state = decoder.snapshot(True, 0, 0)
+    assert state.text == "Rush - Tom Sawyer"
+    assert state.text_steady

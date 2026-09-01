@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import math
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from bettersdr.audio.repro import ReproSettings
 from bettersdr.core import engine as engine_module
 from bettersdr.core.device import MAX_TUNE_HZ, MIN_TUNE_HZ
 from bettersdr.core.engine import (
@@ -385,6 +387,75 @@ def test_recording_opens_and_closes_files(tmp_path):
     _drain(engine)
     assert not engine.recording.active
     assert len(list(tmp_path.glob("*.wav"))) == 2
+
+
+def test_repro_reports_nothing_when_it_is_off():
+    status = Engine().repro
+    assert not status.enabled
+    assert not status.recording
+    assert status.clip_path is None
+
+
+def test_repro_writes_into_a_folder_of_its_own(tmp_path):
+    """An unattended session produces far more files than the two buttons do,
+    and mixing them into one folder buries the deliberate recording."""
+    engine = Engine()
+    engine.recording_dir = tmp_path
+    engine.tune(94_900_000)
+    engine.set_repro_settings(ReproSettings(songs=False))
+    engine.start_repro()
+    _drain(engine)
+    assert engine.repro.enabled
+
+    engine._service_repro(np.zeros((4_800, 2), dtype=np.float32))
+    status = engine.repro
+    assert status.recording
+    assert "Repro-Radio" in (status.clip_path or "")
+    assert Path(status.clip_path or "").name.startswith("RR-94.900MHz-")
+
+    engine.stop_repro()
+    _drain(engine)
+    assert not engine.repro.enabled
+
+
+def test_repro_is_fed_nothing_while_it_is_off():
+    engine = Engine()
+    engine._service_repro(np.zeros((4_800,), dtype=np.float32))
+    assert not engine.repro.recording
+
+
+def test_changing_the_caps_does_not_restart_the_session(tmp_path):
+    """Starting resets the session clock, and a change of hang time must not."""
+    engine = Engine()
+    engine.recording_dir = tmp_path
+    engine.start_repro()
+    _drain(engine)
+    engine.set_repro_settings(ReproSettings(hang_s=9.0, songs=True))
+    _drain(engine)
+    assert engine.repro.enabled
+    assert engine._repro is not None
+    assert engine._repro.settings.hang_s == 9.0
+    assert engine._repro.settings.songs
+    engine.stop_repro()
+    _drain(engine)
+
+
+def test_stopping_the_engine_closes_a_repro_recording(tmp_path):
+    """It has a file open under a name that says "recording", and closing it
+    is what gives the file its end time."""
+    engine = Engine()
+    engine.recording_dir = tmp_path
+    engine.tune(162_550_000)
+    engine.start_repro()
+    _drain(engine)
+    for _ in range(3):
+        engine._service_repro(np.full((48_000, 2), 0.2, dtype=np.float32))
+    engine.stop()
+
+    written = list((tmp_path / "Repro-Radio").glob("*.mp3"))
+    assert len(written) == 1
+    assert "-recording.mp3" not in written[0].name
+    assert written[0].name.startswith("RR-162.550MHz-")
 
 
 def test_stopping_the_engine_closes_a_recording(tmp_path):

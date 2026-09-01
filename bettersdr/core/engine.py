@@ -16,7 +16,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +28,7 @@ from ..audio.record import (
     RecordingLimits,
     timestamped_name,
 )
+from ..audio.repro import ReproRadio, ReproSettings, ReproStatus
 from ..decode import hdradio
 from ..decode.adsb import (
     FREQUENCY_HZ as ADSB_FREQUENCY_HZ,
@@ -390,6 +391,12 @@ class Engine:
         self._audio_recorder: AudioRecorder | None = None
         self._iq_recorder: IqRecorder | None = None
         self._recording_message: str | None = None
+        # Repro-Radio owns its own folder under the recordings directory: an
+        # unattended session produces far more files than the two the buttons
+        # make, and mixing them into one folder would bury the recording
+        # somebody took deliberately.
+        self.repro_settings = ReproSettings()
+        self._repro: ReproRadio | None = None
         self._capture: _Capture | None = None
 
         self._block_bytes = dsp_block_bytes_for(sample_rate)
@@ -544,6 +551,10 @@ class Engine:
         # tidy up. A truncated header makes the file unplayable, which would
         # lose the whole recording rather than its last block.
         self._end_recording(audio=True, iq=True)
+        # Same reasoning, and one more: Repro-Radio has a file open under a
+        # name that says "recording", and closing it here is what gives it
+        # the end time in its name.
+        self._end_repro()
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
@@ -934,6 +945,30 @@ class Engine:
             iq_path=str(iq.path) if iq is not None else None,
             message=self._recording_message,
         )
+
+    @property
+    def repro(self) -> ReproStatus:
+        """What Repro-Radio is doing, or a blank status when it is off.
+
+        The object is kept after a session ends rather than dropped, so the
+        reason it ended - the session limit, a full disk - survives to be
+        read. A view polling this sees `enabled` go false and takes the
+        button back up itself, the same way a recorder that stopped at its
+        size limit un-presses Record audio.
+        """
+        return self._repro.status if self._repro is not None else ReproStatus()
+
+    def set_repro_settings(self, settings: ReproSettings) -> None:
+        """The caps and the switches. Applied on the DSP thread, which owns
+        the state machine and everything it has open."""
+        self.repro_settings = settings
+        self._commands.put(lambda: self._apply_repro(settings))
+
+    def start_repro(self) -> None:
+        self._commands.put(self._begin_repro)
+
+    def stop_repro(self) -> None:
+        self._commands.put(self._end_repro)
 
     def start_recording(self, audio: bool = False, iq: bool = False) -> None:
         """Open a recording. Runs on the DSP thread, which owns the files."""
@@ -2369,6 +2404,70 @@ class Engine:
             self._iq_recorder = recorder if recorder.active else None
             self._recording_message = recorder.stopped_reason or self._recording_message
 
+    def _begin_repro(self) -> None:
+        if self._repro is None:
+            self._repro = ReproRadio(
+                self.recording_dir / "Repro-Radio",
+                self.repro_settings,
+                self.recording_limits,
+                rate=demod.AUDIO_RATE,
+            )
+        self._repro.settings = self.repro_settings
+        self._repro.start()
+
+    def _end_repro(self) -> None:
+        if self._repro is not None:
+            self._repro.stop()
+
+    def _apply_repro(self, settings: ReproSettings) -> None:
+        """A change of switches mid-session, without ending the session.
+
+        `enabled` is deliberately not read from here: starting and stopping
+        go through their own commands, because starting resets the session
+        clock and a change of hang time must not.
+        """
+        if self._repro is None:
+            return
+        self._repro.settings = replace(
+            settings, enabled=self._repro.settings.enabled
+        )
+
+    def _service_repro(self, audio: np.ndarray) -> None:
+        """Hand Repro-Radio the block, with what the station says about it.
+
+        Fed the audio from *before* the volume and the limiter - see
+        `AudioChain.body` - because an unattended recording that carries the
+        volume the listener happened to leave the app at is a folder of files
+        nobody can use.
+
+        The RDS snapshot is taken only when song capture is on, and never
+        during an HD session: the analog path is not running then, so what
+        the receiver last decoded is minutes old and belongs to whatever was
+        being listened to before.
+
+        Only *settled* RadioText is handed over. The screen is welcome to
+        watch a message fill in a few characters at a time; a segmenter that
+        did would read `96.5 Jack FM - The R` as a song, and then read the
+        next four characters of the same message as a different one.
+        """
+        repro = self._repro
+        if repro is None or not repro.settings.enabled:
+            return
+        station = text = genre = ""
+        if repro.settings.songs and self._rds is not None and self._hd is None:
+            rds = self._rds.snapshot()
+            station, genre = rds.name, rds.pty_name
+            text = rds.text if rds.text_steady else ""
+        squelch = self._demod.squelch
+        repro.feed(
+            audio,
+            squelch_open=None if squelch is None else squelch.is_open,
+            center_hz=float(self.center_hz),
+            station=station,
+            radio_text=text,
+            genre=genre,
+        )
+
     def _end_recording(self, audio: bool, iq: bool) -> None:
         if audio and self._audio_recorder is not None:
             self._audio_recorder.stop()
@@ -2490,7 +2589,7 @@ class Engine:
                 # 63 ms per second of radio, and the sink is parked anyway.
                 self._feed_adsb(iq)
                 self._stereo_out = False
-                audio = _NO_AUDIO
+                audio = body = _NO_AUDIO
             elif self._hd is not None:
                 # Fed from `raw`, not from `iq`: `cu8` is byte for byte what
                 # nrsc5 reads, and the front-end chain is bypassed for the
@@ -2498,7 +2597,8 @@ class Engine:
                 # something the digital receiver was never designed to see.
                 # `iq` is still built above, and still drives the spectrum.
                 block = self._feed_hd(raw)
-                audio = self.audio.process(block) if block.size else _NO_AUDIO
+                body = self.audio.body(block) if block.size else _NO_AUDIO
+                audio = self.audio.output(body)
                 self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
                 if audio.size:
                     if not self._hd_acquired:
@@ -2511,10 +2611,12 @@ class Engine:
                         sink.start()
                     sink.write(audio)
             else:
-                audio = self.audio.process(self._demod.process(iq))
+                body = self.audio.body(self._demod.process(iq))
+                audio = self.audio.output(body)
                 self._stereo_out = audio.ndim > 1 and audio.shape[1] > 1
                 sink.write(audio)
             self._service_recorders(raw, audio)
+            self._service_repro(body)
 
             capture = self._capture
             if capture is not None:
@@ -2604,4 +2706,11 @@ class Engine:
             )
 
 
-__all__ = ["DisplayFrame", "Engine", "Mailbox", "RecordingStatus", "ScanUpdate"]
+__all__ = [
+    "DisplayFrame",
+    "Engine",
+    "Mailbox",
+    "RecordingStatus",
+    "ReproStatus",
+    "ScanUpdate",
+]

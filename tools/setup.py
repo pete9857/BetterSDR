@@ -1,17 +1,28 @@
 """Set BetterSDR up and start it, in one command.
 
-    py tools/setup.py
+    BetterSDR.cmd           what a user runs, by double-click or by name
+    py tools/setup.py       the same thing, said the long way
 
 This is not a setuptools script despite the name - nothing here is invoked
 by pip, and `pyproject.toml` is what describes the package. It is the
-front door: it makes the virtual environment, installs what the radio
-needs, checks the dongle, and opens the app. Running it again later is how
-you start the app, and the second run skips everything already done.
+front door, and it is two things at once on purpose:
 
-    py tools/setup.py --check       stop after the driver check
-    py tools/setup.py --update      reinstall the dependencies first
-    py tools/setup.py --recreate    throw the environment away and rebuild
-    py tools/setup.py --dev         install the test and lint tools too
+  * the first time, it makes the virtual environment, installs what the
+    radio needs, checks the dongle and opens the app;
+  * every time afterwards it is simply how BetterSDR is *started*. An
+    installed environment takes the warm path in `main` - one probe, then
+    the app - because a launcher that reprints four steps of installation
+    news every time is a launcher nobody believes.
+
+Driver installation is deliberately not here. Assigning WinUSB to the
+dongle is a one-off job the user does with Zadig before they ever run
+this, and `Getting Started.txt` is where that is written down; all this
+does is report whether it worked.
+
+    BetterSDR.cmd --check       stop after the driver check
+    BetterSDR.cmd --update      reinstall the dependencies first
+    BetterSDR.cmd --recreate    throw the environment away and rebuild
+    BetterSDR.cmd --dev         install the test and lint tools too
 
 Why this exists rather than a downloadable .exe: Smart App Control is on by
 default on a clean Windows 11 machine, and it refuses to start any program
@@ -113,6 +124,27 @@ def remove_environment() -> int | None:
     if not VENV.exists():
         return None
 
+    # Deleting the environment the running interpreter lives in cannot
+    # work on Windows, and the error it produces says nothing useful.
+    # Reached by running this with `.venv/Scripts/python.exe` rather than
+    # through `py`, which is a reasonable thing to try.
+    try:
+        Path(sys.executable).resolve().relative_to(VENV.resolve())
+    except ValueError:
+        pass
+    else:
+        return fail(
+            "This is running from inside the environment it was asked to"
+            " delete.",
+            "Run it with the Python that is installed on the computer rather\n"
+            "than the one in the environment:\n"
+            f"    py {Path(__file__).resolve().relative_to(ROOT).as_posix()}"
+            " --recreate\n"
+            "or just double-click BetterSDR.cmd, which does that for you.",
+        )
+
+    say(f"    removing {VENV.name} and starting again")
+
     def clear_readonly(function, path, _exception) -> None:
         Path(path).chmod(0o700)
         function(path)
@@ -174,7 +206,6 @@ def build_environment(recreate: bool) -> int | None:
     repaired rather than tripped over.
     """
     if recreate and VENV.exists():
-        say(f"    removing {VENV.name} and starting again")
         code = remove_environment()
         if code is not None:
             return code
@@ -256,14 +287,27 @@ def check_radio() -> int:
 
 
 def launch() -> int:
-    say("    starting BetterSDR - close its window to come back here")
     return run([str(venv_python()), "-m", "bettersdr.app"], quiet=True)
+
+
+def installed_and_ready() -> bool:
+    """Can the environment start BetterSDR exactly as it stands?
+
+    The gate on the warm path, so it is asked on every single launch and
+    has to be both cheap and honest. One import answers every question
+    `build_environment` asks separately - an interpreter that is missing,
+    an environment built by a Python that has since been upgraded away,
+    an install that was interrupted - because none of those can import
+    the package. Anything it cannot answer falls through to the full
+    path, which is the one that explains itself.
+    """
+    return venv_python().is_file() and already_installed()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="py tools/setup.py",
-        description="Install BetterSDR into .venv and start it.",
+        prog="BetterSDR.cmd",
+        description="Start BetterSDR, installing it into .venv first if needed.",
     )
     parser.add_argument(
         "--check", action="store_true", help="stop after the driver check"
@@ -282,13 +326,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    say(f"{BAR}\nBetterSDR setup\n{ROOT}\n{BAR}")
-
-    total = 3 if args.check else 4
     for check in (check_interpreter, check_checkout):
         code = check()
         if code is not None:
             return code
+
+    # The warm path: this is a launcher now, not an installer. Anything
+    # that was asked to change the environment skips it and takes the
+    # long way round, where each step says what it is doing.
+    rebuilding = args.update or args.recreate or args.dev
+    if not rebuilding and installed_and_ready():
+        if args.check:
+            return 0 if check_radio() == 0 else 1
+        if args.no_launch:
+            say("BetterSDR is installed. Start it with BetterSDR.cmd.")
+            return 0
+        say("Starting BetterSDR - close its window to come back here.")
+        return launch()
+
+    say(f"{BAR}\nBetterSDR setup\n{ROOT}\n{BAR}")
+
+    total = 3 if args.check else 4
 
     step(1, total, "Preparing the Python environment")
     code = build_environment(recreate=args.recreate)
@@ -307,19 +365,21 @@ def main(argv: list[str] | None = None) -> int:
     ready = check_radio() == 0
     if not ready:
         say(
-            "\n    The radio is not ready yet. The steps above are the fix;\n"
-            "    BetterSDR will also walk you through them on screen."
+            "\n    The radio is not ready yet. The steps above are the fix,\n"
+            "    and step 3 of 'Getting Started.txt' is the same thing at\n"
+            "    more length. BetterSDR will walk you through it on screen\n"
+            "    as well."
         )
 
     if args.check:
         return 0 if ready else 1
 
     if args.no_launch:
-        here = Path(__file__).resolve().relative_to(ROOT).as_posix()
-        say(f"\nReady. Start BetterSDR any time with:\n    py {here}")
+        say("\nReady. Start BetterSDR any time with:\n    BetterSDR.cmd")
         return 0
 
     step(4, total, "Starting BetterSDR")
+    say("    close its window to come back here")
     return launch()
 
 

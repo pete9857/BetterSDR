@@ -13,6 +13,14 @@ dependencies = [
     "pyqtgraph>=0.13.7",
     "sounddevice>=0.5.2",
     "PyYAML>=6.0",
+    # Repro-Radio writes MP3 rather than WAV: an unattended session runs for
+    # hours and fills a music folder, so it has to be small enough to leave
+    # going overnight and playable on anything without being told how. Both
+    # are ordinary PyPI wheels - a 157 KB statically built LAME and a pure
+    # Python tag library - which keeps the property the packaging phase turned
+    # on: nothing on the install path is a new unsigned binary.
+    "lameenc>=1.8",
+    "mutagen>=1.47",
 ]
 
 [project.optional-dependencies]

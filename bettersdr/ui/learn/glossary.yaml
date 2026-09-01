@@ -1601,6 +1601,94 @@ categories:
             size limit and checks free space before starting.
         see: [iq, audio-recording, sample-rate]
 
+      - slug: repro-radio
+        title: Repro-Radio
+        summary: >
+          Leaves the radio recording a frequency on its own, and stops when
+          you told it to.
+        also: [unattended recording, automatic recording, timeshift]
+        where: The Repro-Radio section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            The [[audio-recording|Record audio]] button is for something you
+            are listening to. Repro-Radio is for something you are not: switch
+            it on, walk away, and come back to a folder of what happened.
+          - >
+            It records whenever the signal is there. On a two-way channel
+            you get one file per transmission, because the [[squelch]] closes
+            between them - the Hang time setting is how long it waits before
+            treating a conversation as over, so a pause for breath is not
+            split into two files. On a broadcast station nothing ever closes
+            the gate, so it simply records continuously.
+          - >
+            Files are named for the frequency and the times they cover, like
+            `RR-162.550MHz-20260831T143012Z-20260831T143145Z.mp3`, so a folder
+            of them sorts into order by itself and every one says what stretch
+            of the afternoon it is. They are MP3s at 128 kbps, which is about
+            60 MB an hour - a night of it is a few hundred megabytes rather
+            than the 17 GB an hour [[iq-recording|raw IQ]] would cost.
+          - >
+            Two limits stop it running away. **Maximum recording time** is how
+            long one file may get before the next is started; a single
+            overnight file is one that nothing will let you seek inside.
+            **Stop after** is how long the whole session runs before it
+            switches itself off - the "I am going to bed" setting. It also
+            stops on its own if the disk starts to fill.
+          - >
+            The recording is taken before the [[volume]] control, so turning
+            the sound down - or muting it entirely - changes what you hear and
+            not what is saved.
+          - >
+            If the station sends song information, see [[repro-songs]].
+        see: [repro-songs, audio-recording, squelch, iq-recording]
+
+      - slug: repro-songs
+        title: Saving songs
+        summary: >
+          Pulls individual songs out of an FM station and files them under the
+          artist and title the station transmitted.
+        also: [song recording, taping songs, music capture]
+        where: The Repro-Radio section of the control column, from Standard
+          upwards.
+        body:
+          - >
+            Most FM music stations transmit the name of what they are playing,
+            as [[rds|RDS]] RadioText. That is enough to cut the broadcast into
+            songs, name each one, and put the artist and title inside the file
+            where a music player will find them.
+          - >
+            Songs land in a Songs folder beside the ordinary recordings, named
+            `Artist - Title.mp3`. Everything else the station broadcast is
+            still in the ordinary recordings; the songs are pulled out as
+            well, not instead.
+          - >
+            **Advertisements are not saved.** An advertisement break has no
+            song title, and it does not sound like music - the app measures
+            both, using the same [[voice-detection|listener]] the scanner uses
+            to tell talking from music, and a stretch has to pass both tests
+            before it is kept.
+          - >
+            **You get up to five copies of a song.** That is on purpose. The
+            presenter talks over the end of one, the news cuts into another,
+            and the third is clean - nobody can tell which is the good one at
+            the moment it is recorded, so a few are kept and you throw away
+            the rest. The extras are numbered, `Dreams (2).mp3` and so on.
+            After five, the song is not recorded again. Delete some and it
+            will record more.
+          - >
+            A station has to be sending song information for any of this to
+            happen. On an AM station, or an FM station that sends none, the
+            frequency is still recorded normally - there is just nothing to
+            cut it up by.
+          - >
+            The song starts a few seconds before the station says so, because
+            stations update the title slightly late. The app holds the last
+            few seconds of audio and steps the start backwards to where the
+            sound actually changed, so you get the intro rather than losing
+            it.
+        see: [repro-radio, rds, voice-detection, stereo]
+
       - slug: bookmarks
         title: Saved frequencies
         summary: >

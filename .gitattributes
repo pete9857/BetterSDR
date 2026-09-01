@@ -1,0 +1,6 @@
+* text=auto
+
+# Read in Notepad on a Windows machine, and run by cmd.exe. Both want
+# CRLF whatever the machine that committed them was set to do.
+*.cmd text eol=crlf
+*.txt text eol=crlf

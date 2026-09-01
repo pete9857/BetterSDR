@@ -1,0 +1,220 @@
+BetterSDR - Getting Started
+===========================
+
+A radio receiver for the RTL-SDR dongle, for people who have never used
+one. There are four steps and they take about ten minutes, most of which
+is Windows and Python doing the work.
+
+Read this file top to bottom. Step 3 is the one everybody skips, and
+skipping it is why the dongle does not work.
+
+
+WHAT YOU NEED
+-------------
+
+  * An RTL-SDR dongle and an antenna. BetterSDR is built and tested
+    against the RTL-SDR Blog V4; the V3 and the V4L should work too.
+
+  * Windows 11 (Windows 10 will probably do).
+
+  * Python 3.12 or newer, from https://www.python.org/downloads/
+    In the installer, tick "Add python.exe to PATH". If you already have
+    Python, you are done - you do not need a second copy.
+
+
+STEP 1 - PLUG THE DONGLE IN
+---------------------------
+
+Use a USB port on the computer itself rather than a hub or an extension
+lead, at least until it is working.
+
+Screw the antenna onto it and put the antenna near a window if you can.
+Indoors, three feet from an outside wall, is enough to hear FM stations,
+weather radio and aircraft.
+
+Windows may announce that it is installing a driver. Let it finish. What
+it installs is the wrong driver - it thinks the dongle is a television
+tuner - and step 3 replaces it. That is expected and is not a mistake on
+your part.
+
+
+STEP 2 - GET A COPY OF BETTERSDR
+--------------------------------
+
+In a terminal, wherever you keep projects:
+
+    git clone https://github.com/pete9857/BetterSDR
+    cd BetterSDR
+
+If you do not have git, use the green "Code" button on the GitHub page,
+choose "Download ZIP", and extract it somewhere. That works fine, but a
+downloaded ZIP is marked by Windows as having come from the internet and
+one extra command is needed - see "Windows says an application control
+policy blocked a file" near the bottom of this file.
+
+
+STEP 3 - GIVE THE DONGLE THE RIGHT DRIVER
+-----------------------------------------
+
+Windows has no driver for using this dongle as a radio, only for using
+it as a TV tuner. Replacing it is a one-off job, done with a small free
+tool called Zadig. This is the step that makes everything else work.
+
+  1. Download Zadig from  https://zadig.akeo.ie
+     It is a single file and needs no installing.
+
+  2. Right-click the file you downloaded and choose
+     "Run as administrator".
+
+  3. In Zadig's menu bar, click Options and tick "List All Devices".
+     Nothing useful appears in the dropdown until you do this.
+
+  4. Open the dropdown at the top and choose:
+
+         Bulk-In, Interface (Interface 0)
+
+     *** Interface 0. NOT Interface 1. ***
+
+     The dongle presents itself to Windows as two devices and only the
+     first one is the radio. Choosing Interface 1 is the single most
+     common mistake, and it produces a dongle that looks installed and
+     does not work.
+
+  5. Look at the box to the right of the green arrow. It should say
+     WinUSB. If it says something else, click the small up/down arrows
+     beside it until it does.
+
+  6. Click "Replace Driver" and wait. It takes a few seconds and may
+     look frozen while it works.
+
+  7. When it reports success, close Zadig.
+
+You never have to do this again for this dongle on this computer. If you
+later plug it into a different USB port, or into a different computer,
+Windows may ask again - repeat these steps if so.
+
+Interface 1 will still show up in Device Manager with no driver at all.
+That is correct. Do not try to fix it.
+
+The dongle will no longer work as a TV tuner. If you ever want that
+back, Device Manager can uninstall the WinUSB driver.
+
+
+STEP 4 - START BETTERSDR
+------------------------
+
+Double-click  BetterSDR.cmd  in the folder from step 2.
+
+The first time, it builds a private Python environment in a folder
+called .venv, downloads what the radio needs, checks your dongle, and
+opens the app. That takes a minute or two and needs an internet
+connection.
+
+Every time after that, the same double-click just opens the app, in
+about a second. BetterSDR.cmd is the only thing you need to remember.
+
+If you prefer a terminal, from inside the folder:
+
+    BetterSDR            in Command Prompt
+    .\BetterSDR          in PowerShell
+
+To put it on your desktop, right-click BetterSDR.cmd and choose
+"Send to" then "Desktop (create shortcut)". If you want the proper icon
+on that shortcut, right-click it, choose Properties, then Change Icon,
+and point it at  bettersdr\ui\assets\bettersdr.ico  in this folder.
+
+
+WHAT TO DO FIRST
+----------------
+
+BetterSDR opens on the Discover screen rather than on a spectrum. Pick a
+band - FM Radio is the loudest and the easiest - and press Scan. After a
+few seconds you get a list of what is actually on the air near you, in
+plain English, with the reason it thinks so. Click one to listen.
+
+Everything else is explained in the app itself. Any control whose name
+is underlined can be clicked to read what it does, and the Learn tab has
+the same articles laid out as a short course.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+
+First, check the dongle on its own. In a terminal, in this folder:
+
+    BetterSDR.cmd --check
+
+It stops after the check and prints exactly what is wrong and what to do
+about it. It is the same check the app runs when it opens.
+
+"No RTL-SDR dongle found"
+    It is not plugged in, or the port is not working. Try another port
+    directly on the computer.
+
+"Dongle found, but it is set up as a TV tuner"
+    Step 3 has not been done, or it was done on the wrong interface. Run
+    Zadig again and choose Interface 0.
+
+"Dongle found, but Windows has no driver for it"
+    Same answer: step 3, Interface 0.
+
+The dongle looks installed but nothing works
+    You almost certainly picked Interface 1 in Zadig. Run Zadig again
+    and pick "Bulk-In, Interface (Interface 0)".
+
+"Python was not found on this computer"
+    Install Python from https://www.python.org/downloads/ and tick
+    "Add python.exe to PATH" in the installer. Then try again.
+
+Windows says an application control policy blocked a file
+    Also seen as "WinError 4551". Smart App Control is refusing to load
+    the radio driver because the files are marked as having come from
+    the internet, which is what happens when you download a ZIP.
+
+    Open PowerShell in this folder and run:
+
+        Get-ChildItem -Recurse | Unblock-File
+
+    then try again. If you cloned with git rather than downloading a
+    ZIP, the files carry no such mark and the cause is Smart App Control
+    itself; turn it off in Windows Security, under "App & browser
+    control", "Smart App Control settings".
+
+    Running the terminal as administrator does NOT help. This is
+    enforced by Windows below the point at which being an administrator
+    means anything.
+
+The download or the install failed
+    Usually no internet connection, or a firewall or proxy in the way.
+    Fix that and run BetterSDR.cmd again - it picks up where it left
+    off, and running it again after a failure is always safe.
+
+
+OTHER COMMANDS
+--------------
+
+    BetterSDR.cmd              start BetterSDR, installing it first if
+                               this is the first time
+    BetterSDR.cmd --check      check the driver and the dongle, then stop
+    BetterSDR.cmd --update     download and reinstall the dependencies
+    BetterSDR.cmd --recreate   throw the .venv folder away and build it
+                               again from scratch
+    BetterSDR.cmd --dev        also install the test and lint tools
+
+Nothing in .venv is yours. Deleting that folder and running
+BetterSDR.cmd again is a safe reset for almost any installation problem.
+
+
+WHERE YOUR THINGS ARE KEPT
+--------------------------
+
+    Settings and bookmarks     %APPDATA%\BetterSDR
+    Recordings                 your home folder, "BetterSDR Recordings"
+
+Uninstalling is deleting the folder you cloned. If you want no trace
+left, delete %APPDATA%\BetterSDR as well, and use Device Manager to put
+the dongle's original driver back.
+
+
+BetterSDR is free software under the GNU General Public License v3 or
+later. See LICENSE and THIRD-PARTY.md. It is for educational use.

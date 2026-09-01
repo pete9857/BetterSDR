@@ -19,6 +19,9 @@ the repository or in a packaged build, and under what terms.
 | **sounddevice** | packaged build only | MIT | |
 | **PortAudio** | packaged build only | MIT | Bundled inside the `sounddevice` wheel. |
 | **PyYAML** | packaged build only | MIT | |
+| **lameenc** | packaged build only | MIT | The wrapper. |
+| **LAME** | packaged build only | LGPL-2.1-or-later | Statically built into the `lameenc` wheel; used by Repro-Radio to write MP3. |
+| **mutagen** | packaged build only | GPL-2.0-or-later | Writes the ID3 tags on saved songs. Compatible with this project's GPL-3-or-later. |
 
 ## Bundled data
 

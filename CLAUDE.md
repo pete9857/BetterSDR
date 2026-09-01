@@ -42,7 +42,8 @@ them, who the space is licensed to - and any number of them can be
 scanned or monitored together. Driven through the real widgets
 offscreen and through the real engine against synthetic air; **not
 yet swept against a real band** |
-| **5 — Packaging** | **Complete, by a different route than planned** (2026-08-30). The supported install is a clone and one command — `py tools/setup.py` builds the environment, installs everything, checks the dongle and opens the app; verified end to end from a clean copy of the checkout on the system Python. The PyInstaller one-folder build also ships and is complete, but **Smart App Control blocks an unsigned executable outright on Windows 11**, so it cannot be started on this machine and is **unverified**. `tools/check_bundle.py` runs the application out of the bundle to prove everything except the bootloader. See **Amendment 17** in docs/PLAN.md. |
+| **5 — Packaging** | **Complete, by a different route than planned** (2026-08-30), **and reshaped around Zadig on 2026-08-31**. The supported install is four steps written out in `Getting Started.txt`: plug the dongle in, clone, run Zadig, double-click `BetterSDR.cmd`. Zadig is a documented first-class step now rather than a remedy the app offers after something has already gone wrong - on a second machine, doing it up front made every other problem disappear. `BetterSDR.cmd` is the whole interface: the first run installs, every run after that takes the warm path in `tools/setup.py` and starts the app straight away - the probe that decides this costs **0.3 s**. Verified end to end from a clean copy of the checkout on the system Python, cold and warm. The PyInstaller one-folder build also ships and is complete, but **Smart App Control blocks an unsigned executable outright on Windows 11**, so it cannot be started on this machine and is **unverified**. `tools/check_bundle.py` runs the application out of the bundle to prove everything except the bootloader. See **Amendment 17** in docs/PLAN.md. |
+| **6 — Repro-Radio** (unattended recording, songs off air) | **Complete and verified on hardware** (2026-08-31). Squelch-gated MP3 recording with a hang time and two time caps; songs cut out of a broadcast by RDS RadioText, tagged with artist and title, advertisements refused, up to five copies kept. Song separation, the advertisement refusal, the artist/title order and the encoder's band limit were all **reworked against a real station on 2026-08-31** after it saved nothing in eight minutes on air - three songs in seven minutes now, one file each, no advertisement kept. See **Amendment 19** and **Amendment 20** in docs/PLAN.md. |
 
 ### Driver state on this machine
 
@@ -59,11 +60,18 @@ Check current state any time with:
 
 Exit code 0 means ready; 1 means it prints the specific remedy.
 
-**Still to build: `core/installer.py`** — drives a bundled `wdi-simple.exe` (from
-libwdi, the library Zadig is built on) to bind WinUSB from inside the app, so a
-first-time user never has to find Zadig. See **Amendment 1** in docs/PLAN.md. The
-Zadig walkthrough in `doctor.py` stays as the fallback for a declined UAC prompt or
-a machine where policy blocks driver installation.
+**Zadig is the documented first step, not a fallback** (2026-08-31). Step 3 of
+`Getting Started.txt` is the user running Zadig before they install anything,
+because on a second machine doing it up front made every other problem go away.
+Nothing in the app installs a driver; `doctor.py` carries the same steps for the
+case where it was skipped or done on interface 1.
+
+**Still possible, and no longer urgent: `core/installer.py`** — drives a bundled
+`wdi-simple.exe` (from libwdi, the library Zadig is built on) to bind WinUSB from
+inside the app, so a first-time user never has to find Zadig. See **Amendment 1**
+in docs/PLAN.md. It would remove step 3 rather than fix a broken path, and it
+brings a signed-binary problem of its own to a project that has just spent a phase
+on that.
 
 Two things to know before working on it:
 
@@ -80,13 +88,19 @@ Two things to know before working on it:
 ## Running things
 
 ```bash
-# What a user runs. Builds .venv, installs, checks the dongle, opens the app;
-# a second run skips everything already done and takes about a second. Uses
-# the system Python, and only the standard library, because it is what runs
-# before anything is installed. BetterSDR.cmd is the double-click equivalent.
-py tools/setup.py
-py tools/setup.py --check       # stop after the driver check
-py tools/setup.py --recreate    # throw .venv away and build it again
+# What a user runs, by double-click or by name. The first run builds .venv,
+# installs, checks the dongle and opens the app; every run after that takes
+# the warm path and just opens the app, in about a second. Everything it
+# does is tools/setup.py, which uses the system Python and only the standard
+# library, because it is what runs before anything is installed.
+BetterSDR.cmd                   # or `py tools/setup.py`, the long way
+BetterSDR.cmd --check           # stop after the driver check
+BetterSDR.cmd --update          # reinstall the dependencies
+BetterSDR.cmd --recreate        # throw .venv away and build it again
+
+# Driver installation is not in here. Assigning WinUSB with Zadig is step 3
+# of Getting Started.txt and the user does it before any of this runs; all
+# setup does is report whether it worked.
 ```
 
 ```bash
@@ -111,7 +125,9 @@ py tools/setup.py --recreate    # throw .venv away and build it again
 ```
 
 Settings and bookmarks live in `%APPDATA%/BetterSDR/`; recordings go to
-`~/BetterSDR Recordings` as WAV, audio as 16-bit mono at 48 kHz and IQ as the
+`~/BetterSDR Recordings` as WAV, with Repro-Radio's own MP3s under
+`~/BetterSDR Recordings/Repro-Radio/` and the songs it pulled out of them in
+`.../Repro-Radio/Songs/`, audio as 16-bit mono at 48 kHz and IQ as the
 two-channel 8-bit file SDR#, HDSDR and GNU Radio all read back.
 
 `listen.py` is the Phase 1 acceptance test in runnable form and has no Qt in it, so
@@ -616,12 +632,15 @@ docs/PLAN.md.
   build made this morning cannot earn reputation; only signing clears it,
   and an EV certificate is the only kind that clears it from day one.
 - **A Python interpreter is signed and recognised, which is why the
-  supported install is a clone and one command.** `py tools/setup.py` builds
-  the environment, installs, checks the dongle and opens the app. Every
-  binary it *runs* is either Python itself or a PyPI wheel Microsoft has
-  seen millions of times. Measured: **first run about two minutes**
-  (thirteen packages), **second run 1.7 seconds**, because
-  `already_installed()` is a real import rather than a marker file.
+  supported install is a clone and a double-click.** `BetterSDR.cmd` runs
+  `tools/setup.py`, which builds the environment, installs, checks the
+  dongle and opens the app. Every binary it *runs* is either Python itself
+  or a PyPI wheel Microsoft has seen millions of times. Measured: **first
+  run about two minutes** (thirteen packages, downloaded; 20 s against a
+  warm pip cache), **second run 0.3 seconds** before the app itself starts,
+  because `installed_and_ready()` is a real import rather than a marker
+  file. `--check` on a warm environment is 1.8 s, and all of that is the
+  driver check and its capture test.
 - **Smart App Control blocks unsigned DLLs too, and this route is not immune
   after all.** Corrected on 2026-08-30, from a second machine: the claim
   above used to read "nothing new and unsigned is ever executed", which was
@@ -725,6 +744,271 @@ docs/PLAN.md.
 - **A `QGuiApplication` that nothing holds a reference to segfaults the
   renderer.** Rendering an SVG needs one alive, and letting it be collected
   is not an exception - it is exit code 139 with no message.
+
+Reshaped on 2026-08-31, after doing the Zadig steps on a second machine
+first and finding that everything else then simply worked. Same rule.
+
+- **Zadig belongs before setup, not after it, and the whole install reads
+  differently once it does.** The old order had the user install a Python
+  environment, run a driver check, be told the check failed, and only then
+  meet Zadig - so the first thing that happens to a beginner is a failure,
+  and the fix arrives as a remedy for it. Doing it up front on a second
+  machine "solved all my issues right away". `Getting Started.txt` is
+  therefore four steps - plug in, clone, Zadig, double-click - and
+  `tools/setup.py` no longer pretends to be part of the driver story; it
+  reports whether Zadig worked and points at step 3 when it did not.
+- **A plain `.txt` in the checkout is the only document that can be read at
+  the moment it is needed.** Step 3 happens before anything is installed
+  and possibly before the user has looked at GitHub's rendering of the
+  README, so the instructions have to survive being double-clicked in
+  Explorer. CRLF and a `.gitattributes` that keeps it that way, for the
+  same reason.
+- **The front door has to be one thing, and it has to be a launcher on the
+  second run.** `BetterSDR.cmd` installs the first time and starts the app
+  every time after, because two names - one to install, one to run - is
+  one more thing to remember than a beginner has spare. What makes it feel
+  like a launcher rather than an installer is the warm path in `main`:
+  one import probe and then the app, with none of the four-step
+  installation news. An installer that reprints its progress every launch
+  is one nobody reads.
+- **The warm path's gate is a single import, and that is the whole
+  economy.** It runs on every launch, so `installed_and_ready()` asks the
+  three questions `build_environment` asks separately - an interpreter
+  that is missing, an environment built by a Python since upgraded away,
+  an install that was interrupted - by the fact that none of them can
+  import the package. Anything it cannot answer falls through to the long
+  path, which is the one that explains itself.
+- **`--recreate` run from inside `.venv` cannot work, and the error says
+  nothing.** Windows will not delete the directory the running interpreter
+  lives in. Reached by anyone who types
+  `.venv/Scripts/python.exe tools/setup.py --recreate`, which is a
+  reasonable thing to try; `remove_environment` now recognises it and
+  names the fix. `BetterSDR.cmd` uses the system Python for exactly this
+  reason.
+- **librtlsdr prints one routine line and it had nowhere to go.** `Exact
+  sample rate is: 1488375.071248 Hz` is written from C to file descriptor
+  2 whenever the RTL2832U's divider cannot hit the requested rate exactly,
+  which for this app means the HD Radio rate and nothing else - so it
+  appeared on the console once per HD session saying only what
+  `decode/hdradio.py` already knew. Replacing `sys.stderr` does nothing:
+  the DLL never touches it. `native.quiet_driver` borrows descriptor 2 for
+  the length of the call, and **filters rather than mutes** - every other
+  line the DLL can print is a genuine fault, so a mute would have swallowed
+  `usb_claim_interface error -6` along with the noise. The DLL's two
+  open-time lines (`Found Rafael Micro R828D tuner`, `RTL-SDR Blog V4
+  Detected`) are left alone deliberately: they are the driver confirming
+  the fork detection that this whole module exists to get right.
+
+## Repro-Radio facts
+
+Measured on this machine on 2026-08-31, against synthetic stations. Same rule
+as the other fact sections: don't re-derive them. The feature ships and has
+**not yet been left running on a real station** - see the note at the end.
+Full reasoning in **Amendment 19** of docs/PLAN.md.
+
+- **MP3 has no header to fix at the end, and that is why the naming works.**
+  A file is a run of frames, so a recording cut short by a crash is a playable
+  file that is merely shorter than intended - which is what lets the
+  in-progress name be a *rename* at close rather than a rewrite, and it is
+  exactly what the WAV recorders cannot do. `RR-98.500MHz-<start>-recording.mp3`
+  becomes `RR-98.500MHz-<start>-<end>.mp3`.
+- **The encoder costs 6.8 ms per second of 48 kHz stereo**, on noise, which is
+  the worst case a lossy encoder can be handed. 0.7% of a core against the WFM
+  demodulator's 6.3%, so it runs inline on the DSP thread like the WAV writers
+  - no queue, no thread of its own. 128 kbps stereo, 64 mono, CBR because a
+  recording that may run for hours has to be able to say what it will cost
+  before it starts.
+- **`lameenc` and `mutagen` are ordinary PyPI wheels**, a 157 KB statically
+  built LAME and a pure-Python tag library. That is the whole reason they were
+  chosen over a bundled `ffmpeg.exe`: Amendment 17's conclusion is that
+  nothing on the install path may be a new unsigned binary.
+- **A minimum-clip guard has to measure signal, not file length.** With a 3 s
+  hang time every file is at least 3 s long, so a file-length test can never
+  discard anything. `MIN_SIGNAL_S` counts how long the *gate* was open, at
+  half a second - shorter than the shortest thing anybody says, longer than a
+  click.
+- **The per-recording cap is enforced by `ReproRadio`, not by
+  `RecordingLimits`.** Handing `max_seconds` to the recorder means the only
+  way to tell "roll over to the next file" from "the disk is filling" is to
+  compare message strings. The recorder's own stop now means exactly one thing
+  and is always worth reporting.
+- **RadioText is late at both ends, so the song file is written from a buffer
+  running 25 s behind real time.** The boundary is placed backwards from the
+  text change - to the last moment the sound changed between speech and music
+  if there was one, and to a fixed 6 s lag if there was not. Writing in real
+  time and trimming afterwards is not available: an MP3 is a stream of frames
+  and there is no going back into one. The buffer is 45 s of stereo float,
+  17 MB, and that is the price of being able to start a recording in the past.
+- **A change of RadioText is not a change of song, and getting this wrong
+  fails silently.** A great many stations alternate their slogan with the
+  title every few seconds; treating each flip as a boundary produces nothing
+  but eight-second fragments, all below the minimum song length, so the
+  feature runs and never saves anything. A song is identified by its *tag* -
+  the segment stays open while the same tag keeps returning, and closes when a
+  different one arrives or the title has been gone for `TAG_GAP_S` (20 s).
+- **Telling a slogan from a title cannot be done one string at a time, and two
+  plausible rules are wrong.** "Seen three times before" refuses the third
+  play of a real song, which is the copy the five-copies rule promised.
+  "Came back quickly and its last stretch was short" brands the *song title*
+  on an alternating station, because there its stretches are eight seconds
+  too. What works is a **lifetime**: still turning up after longer than a song
+  could last (15 min), and never once left up for as long as it takes to
+  announce one (45 s). A slogan does both; a title can do neither.
+- **A title is not enough to prove a song.** `Bobs Motors - Best Deals In
+  Town` parses perfectly. The audio has to agree - `scan/voice.py`, reused
+  unchanged from the monitor, reads a verdict off 0.8 s once a second and a
+  segment is kept only if most of it measured as music. The two checks are
+  independent, which is the point: an advertisement has to pass both and fails
+  both.
+- **The five-copies count is taken from the filesystem, not from the index.**
+  Pruning a folder down to the best take is exactly what this feature expects
+  somebody to do, and a count that did not notice would mean that song was
+  never recorded again - which looks like the station simply not playing it.
+- **`key_for` must collapse whitespace after stripping punctuation.** Dropping
+  an apostrophe leaves a space where it was, so `Guns N' Roses` folded to two
+  spaces where `Guns n Roses` folded to one - and each spelling would have got
+  five copies of its own. Found by a test, not by reading.
+- **The volume knob must not reach the file.** `AudioChain` is now `body` then
+  `output`, and Repro-Radio taps `body` - after the AGC, before volume and
+  mute - so an unattended session recorded at a whisper is not a folder of
+  whispered files. The Record audio button still records `process`, because a
+  manual recording is a record of a listening session.
+- **The song file is opened lazily**, once a segment has lasted 20 s. Nothing
+  is lost - the audio is in the buffer either way - and a station whose text
+  fragments then writes no files at all rather than creating and deleting one
+  every eight seconds. A song refused by the five-copies rule never touches
+  the disk.
+- **A gap in the audio is how a borrowed radio is noticed, and there is no
+  call site for it.** A sweep, the aircraft screen and a monitor session all
+  simply stop feeding `ReproRadio.feed`, so it treats more than `FEED_GAP_S`
+  (2 s) of silence as an interruption and closes what was open, exactly as a
+  retune does. That is not tidiness: the rolling buffer finds positions by
+  *elapsed time*, so one left spanning an excursion would place a song
+  boundary in audio from 1090 MHz. Two seconds is longer than a gain probe's
+  340 ms and shorter than the briefest sweep.
+- **The known limitation, stated rather than hidden.** On a station whose
+  slogan *also* parses as an artist and a title, the first quarter of an hour
+  produces fragments and may keep one wrongly-named file, because until the
+  slogan has outlived a song there is no evidence separating them.
+  `test_the_station_is_only_learnt_after_a_song_has_gone_by` asserts it.
+
+Measured off air on 96.5 MHz on 2026-08-31, prompted by "the radio repo
+feature doesn't seem to be separating songs". It does now: three songs in
+seven minutes, one file each, no advertisement kept, against zero songs in
+eight minutes before. Same rule as the other fact sections: don't re-derive
+them.
+
+- **RadioText is only worth reading once all of it has arrived, and this was
+  the whole of the bug.** `RdsState.text` is the 64-character buffer as it
+  stands, which is right for a display and poison for anything reading it as
+  data: 96.5 assembles `96.5 Jack FM - The Real Slim Shady - Eminem` four
+  characters at a time, and every state on the way - `96.5 k FM - The R`,
+  `...The Real Slim`, `...Sha` - is a well-formed artist and title. The
+  segmenter started a new song several times a second and finished none of
+  them, which is a feature that appears to run and never saves anything.
+  `RdsState.text_steady` is the gate and `_service_repro` hands over an empty
+  string until it is true; the churn went from dozens of messages in four
+  minutes to three.
+- **A great many stations never toggle the A/B flag, so nothing clears the
+  buffer.** A shorter message arriving over a longer one leaves the tail of
+  the old one behind and the two read as one string - `Playing What We Want
+  ........ Shady - Eminem` was read off air. Noticing that a segment carries
+  something *different from what is already stored* is what stands in for the
+  flag. Only a segment already had in this pass counts as news: on the first
+  assembly of any message every segment differs from the spaces underneath
+  it, and resetting on that clears the tally sixteen times running.
+- **Reaching the last character written is not reaching the end of the
+  message.** The buffer is spaces underneath, so the first four segments
+  cover every character there is and read as a complete `96.5 Jack FM - T`.
+  Something has to say there is no more coming: the carriage return, a whole
+  pass of sixteen segments, or a segment arriving again with nothing new in
+  it. All three are needed - a station that sends no terminator and stops
+  short of segment 15 satisfies only the last.
+- **The terminator has to be looked for in the bytes.** `_character` turns
+  everything outside the printable range into a space, carriage return
+  included, so searching the decoded string never matched. It had been dead
+  code in `snapshot` since RDS shipped, with `.rstrip()` covering for it.
+- **Every occurrence of the separator splits, not just the first.** Splitting
+  once gives an artist called `96.5 Jack FM` playing `The Real Slim Shady -
+  Eminem` - a well-formed answer that is wrong about every song the station
+  plays, and one no amount of confidence in the audio can catch. Fields that
+  are the station naming itself are dropped and exactly two have to be left;
+  three unrecognisable ones are refused rather than guessed at.
+- **The dial position is the rule that pays for itself immediately.** A field
+  carrying the frequency the receiver is tuned to is the station, no learning
+  required, and it is how most US stations identify themselves. The learnt
+  rule behind it - a value that keeps company with too many different songs -
+  needs two songs, and needs a *share* as well as a count: after a second
+  Eminem song, `Eminem` has two sets of companions exactly as the slogan
+  does. What separates them is that the slogan is in nearly every message.
+- **The station's own name has to be most of a field, not merely in it.** A
+  program service name of JACK, MIX or KISS is a word, and a containment rule
+  throws away `Jack Johnson` as the station.
+- **Which half is the artist is the one thing the string cannot say, and the
+  two message shapes answer it differently.** `A - B` with nothing set aside
+  is `Artist - Title`, the near-universal convention. `Slogan - A - B` is a
+  station *announcing what is on* rather than labelling a file, and reads the
+  other way round - "on 96.5 Jack FM: Seven Nation Army, by the White
+  Stripes". Every message measured on the station confirms it, and treating
+  both shapes alike named every file on it backwards. It is a prior rather
+  than a fact, so the learner can still overturn it: a station writing
+  `Slogan - Artist - Title` is corrected the first time an artist comes round
+  with a second song.
+- **A song ends when the music stops, not when the title blinks.** A play of
+  `Teenage Dirtbag` lost its own title for 32 seconds in the middle while the
+  record kept playing; closing on `TAG_GAP_S` alone made two files out of one
+  play and saved both, as copy 1 and copy 2. `TAG_LOST_S` is the backstop for
+  a station that stops naming anything and never stops playing.
+- **A boundary must never be further back than the file already reaches.**
+  The writer runs `WRITE_LAG_S` behind and an MP3 cannot be rewound, so an
+  older boundary silently appends whatever came next instead of trimming it.
+- **The old `_sound_changed` fired on every one-second flicker.** Real
+  broadcast music does not read as music every second - twenty-seven blips of
+  `tone` or `data` inside one song - so "the last time the reading changed"
+  places a boundary at random. The questions are "when did this music start"
+  and "when did it stop", walked through the music readings alone with an
+  eight-second tolerance.
+- **Speech is what tells an advertisement from a song, and music share is
+  not.** Measured over a quarter of an hour, five real songs and two real
+  breaks: songs read as music **0.30-0.67** and as speech **0.00-0.05**; the
+  breaks read as music **0.14 and 0.37** and as speech **0.18 and 0.25**. The
+  music shares *overlap outright* - a rap record read as music less often
+  than a news bulletin did, because `scan/voice.py` calls a drum machine
+  `data` - so `MIN_MUSIC_SHARE` at 0.6 refused four of the five songs. The
+  speech shares do not overlap at all. `MAX_SPEECH_SHARE` 0.10 sits between
+  them with a factor of two either side; `MIN_MUSIC_SHARE` 0.25 stays as a
+  floor rather than a test.
+- **The first line of defence against an advertisement is the text, not the
+  audio.** 96.5 sends `Accident? Boohoff Law. Better Off With Boohoff! -
+  96.5 Jack FM` during one: the station field is dropped, one field is left,
+  and no song is claimed at all. The audio checks are what catch the
+  advertisement whose copy happens to parse.
+- **The encoder must never be handed anything above 15 kHz.** Analog FM
+  stereo is band-limited to 15 kHz by the standard - the 19 kHz pilot has to
+  sit above the audio - so everything a demodulator produces above that is
+  hiss the transmitter never sent, and hiss is the single most expensive
+  thing a lossy encoder can be given: it looks like signal at every frequency
+  and there is nothing to mask it behind. At 128 kbps the audible result was
+  cymbals and reverb tails turning to a warble. `filters.LowPass` at 15 kHz
+  ahead of the encoder measures flat to 14 kHz, -19 dB at 16-18 kHz and
+  -50 dB above 19 kHz; `lameenc` exposes no lowpass setter, and LAME's own
+  sits above the broadcast limit at every rate this uses.
+- **The rate is then set by what the broadcast contains, not by taste.** An
+  HD Radio hybrid simulcast carries its whole digital payload in about
+  100 kbps of HDC and the local HD1 measured 92, so **160 kbps** of MP3 over
+  a 15 kHz source is well clear of the thing being recorded. 20 kB a second,
+  against the mono WAV recorder's 96.
+- **Clip names are `RR-96.500MHz-0831143012-0831143145.mp3`** - month, day,
+  hour, minute, second, two digits each, in **local** time. These are the one
+  set of files a person reads a time off directly, and a recording made at
+  eight in the evening that calls itself the next day cannot be matched to
+  what they remember hearing. The year is in the file's own date. Two files
+  landing on one name across a daylight-saving change are numbered by
+  `_free_path`.
+- **What has not been seen yet.** A station that writes `Artist - Title`
+  after its own slogan, which is the case the order learner exists for; and a
+  station whose slogan carries no dial position, where recognising it costs
+  two songs.
 
 ## HF and sample-rate facts
 
@@ -1437,11 +1721,27 @@ bettersdr/
     pocsag.py     pager text off a two-way FM channel: an interpolating bit
                   clock at 512/1200/2400 bps at once, stateless frame sync,
                   BCH(31,21), capcodes and both readings of the message
+    songtag.py    reading a song out of RadioText, and knowing when it is the
+                  station talking instead. Two questions, kept apart because
+                  they fail differently: one is a pure function over a string
+                  and the other can only be answered from elapsed time
 vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
                   bundled and spoken to over pipes, never linked
   audio/
     output.py     jitter buffer + clock drift sync
-    record.py     audio WAV and byte-exact baseband IQ WAV, with limits
+    record.py     audio WAV and byte-exact baseband IQ WAV, with limits.
+                  `_Recorder` is the limits and the disk guard on their own,
+                  because `encode.py` needs the same ones
+    encode.py     MP3, and the ID3 tags that make a folder of files a
+                  collection. The one place in the app that is not writing a
+                  measurement, which is the whole argument for a lossy codec
+    library.py    the saved songs: what to call a file, and when to stop
+                  making more. Five copies, counted from the folder rather
+                  than from the index, because pruning it is the point
+    repro.py      Repro-Radio: the squelch gate and its hang, the two time
+                  caps, and the song segmenter - a rolling buffer, a boundary
+                  placed backwards from a station's late RadioText, and two
+                  independent reasons to refuse an advertisement
   ui/
     app shell     main_window.py, levels.py, listen_view.py, discover_view.py,
                   aircraft_view.py, learn_view.py
@@ -1484,12 +1784,18 @@ packaging/        the two entry-point shims a frozen build needs, and
                   and hand over. Not part of the radio
 BetterSDR.spec    the PyInstaller recipe: one folder, two executables, one
                   module archive between them
-BetterSDR.cmd     double-click front door; finds a Python and runs
-                  tools/setup.py. A script rather than a program, because
-                  Smart App Control blocks the latter
+BetterSDR.cmd     the front door, and the only name a user needs. Finds a
+                  Python and runs tools/setup.py: installs the first time,
+                  opens the app every time after. A script rather than a
+                  program, because Smart App Control blocks the latter
+Getting Started.txt  the install, in four steps, in plain text so it can be
+                  read in the folder before anything is installed. Step 3
+                  is Zadig, and it is the step everything else depends on
 tools/
-  setup.py        what a user runs. Standard library only - it is what runs
-                  before anything is installed
+  setup.py        what BetterSDR.cmd runs. Two things at once on purpose:
+                  the installer on the first run, the launcher on every one
+                  after - see the warm path in `main`. Standard library
+                  only; it is what runs before anything is installed
   build_app.py    builds the packaged application and then checks what came
                   out: every file, and every module, in the bundle
   check_bundle.py runs the application out of the bundle with a bare
@@ -1504,7 +1810,8 @@ tests/
   synth_adsb.py   Mode S bursts; synth_pocsag.py  pager transmissions
   synth_audio.py  what a demodulator hands over: speech with a syllable
                   rhythm and a wandering pitch, sustained music, a tone, an
-                  FSK bit stream, static and a dead carrier
+                  FSK bit stream, static and a dead carrier. Also what a
+                  synthetic station plays, for `test_repro.py`
 ```
 
 ### Threading model
@@ -1757,17 +2064,37 @@ Device control calls are serialised through a command queue consumed by the read
   behind the Discover screen accrues nothing - which is the honest reading of
   "played". `MAX_TICK_SECONDS` is what stops a minimised window coming back and
   claiming the hour.
-- **The way in is a clone and one command, not a download.** Smart App
+- **The way in is a clone and a double-click, not a download.** Smart App
   Control refuses to start an unsigned program on a clean Windows 11
   machine and offers no way past the dialog, so a downloadable `.exe` is
-  not a route a beginner can take. `py tools/setup.py` is - it uses a
-  signed interpreter and installs nothing but ordinary packages. Anything
-  added to the setup path must keep that property: the moment it writes a
-  new binary and runs it, it is back to being blocked.
+  not a route a beginner can take. `BetterSDR.cmd` is - it hands a script
+  to the signed `cmd.exe`, which runs a signed interpreter, which installs
+  nothing but ordinary packages. Anything added to the setup path must keep
+  that property: the moment it writes a new binary and runs it, it is back
+  to being blocked.
+- **The driver comes before the software, and the instructions for it are
+  a text file in the checkout.** Zadig is step 3 of four in
+  `Getting Started.txt`, done by the user before setup ever runs, because
+  a beginner whose first experience of the app is a failed driver check
+  has already been told the thing does not work. `doctor.py` still carries
+  the same steps for the case where it was skipped or done on interface 1,
+  but it is the second line of defence now rather than the first.
+- **One name, two jobs, and the second one has to feel like the second
+  one.** `BetterSDR.cmd` installs the first time and launches every time
+  after. The warm path in `tools/setup.py` is what makes that true: one
+  import probe, then the app, and none of the installation news. An
+  installer that reprints four steps of progress on every launch is a
+  launcher nobody believes.
 - **`tools/setup.py` may import only the standard library.** It is what
   runs before anything is installed. This is not a style preference; an
   import of anything else is a script that cannot run on the machine it
   exists to set up.
+- **The driver's own output is filtered, never muted.** librtlsdr writes
+  from C to file descriptor 2, so `sys.stderr` cannot see it and a
+  `contextlib.redirect_stderr` does nothing. `native.quiet_driver` borrows
+  the descriptor and writes back everything that is not on a one-line
+  known-noise list, because every other thing the DLL prints is a real
+  fault and a mute would take those with it.
 - **A frozen build's entry point is a shim, never a module of the
   application.** `bettersdr/app.py` imports its siblings relatively, and as
   a frozen `__main__` that resolves to nothing - silently, with the whole
@@ -1784,6 +2111,32 @@ Device control calls are serialised through a command queue consumed by the read
   what it produced, and `tools/check_bundle.py` runs the application out of
   the bundle. Both exist because a bundle missing the entire application
   looked completely normal.
+- **A manual recording is what you heard; an unattended one is not.** The
+  Record audio button writes `AudioChain.process`, volume and all, because
+  that is what a record of a listening session means. Repro-Radio writes
+  `AudioChain.body` - after the AGC, before volume and mute - because a folder
+  of files recorded at whatever the slider happened to be at is unusable, and
+  muting the speakers must not produce hours of zeros.
+- **A feature that runs unattended states its limits before it starts, and
+  reports why it stopped.** Both Repro-Radio caps are chosen from a list
+  rather than typed, the status line says how long is left, and a session that
+  ended - the limit, a full disk, an encoder that could not open a file -
+  leaves its reason where the view can read it and takes its own button back
+  up. A control claiming to be recording when it is not is worse than no
+  control.
+- **Two weak signals agreeing beats one strong one, where neither can be
+  trusted alone.** A song is only saved if the station named it *and* the
+  audio sounded like music. Either on its own is wrong in a way the other
+  catches: RadioText carries advertisements and phone numbers, and the music
+  detector cannot tell one song from the next. The same shape as the
+  classifier refusing to call flatness digital without an allocation to back
+  it.
+- **What a station transmits is data, not truth, and it repeats.** Anything
+  read off RDS has to survive a slogan shaped exactly like a song title, a
+  title that scrolls, and the same string coming round every four minutes all
+  afternoon. `decode/songtag.py` answers "is this the station or the
+  programme" from *elapsed time* rather than from the string, because no rule
+  about the string itself can separate them.
 - Line length 90, ruff with `E,F,I,UP,B,SIM`. Keep `ruff check .` clean.
 
 ## Git

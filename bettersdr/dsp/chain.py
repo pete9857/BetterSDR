@@ -231,6 +231,16 @@ class AudioChain:
     # -- streaming ---------------------------------------------------------
 
     def process(self, audio: np.ndarray) -> np.ndarray:
+        return self.output(self.body(audio))
+
+    def body(self, audio: np.ndarray) -> np.ndarray:
+        """Everything up to and including the AGC, with volume still to come.
+
+        Split out because an unattended recording must not carry the volume
+        the listener happened to be at, nor go silent because they muted the
+        speakers - see `audio/repro.py`. This is the last point at which the
+        audio is a property of the broadcast rather than of the session.
+        """
         if audio.size == 0:
             return audio
         if self.noise_reduction and self._nr is not None:
@@ -250,6 +260,10 @@ class AudioChain:
             audio = self._band.process(audio)
         if self.agc_enabled:
             audio = self._agc.process(audio)
+        return audio
+
+    def output(self, audio: np.ndarray) -> np.ndarray:
+        """Volume, mute and the limiter that ends the path."""
         if audio.size == 0:
             return audio
         if self.mute:
