@@ -6,6 +6,16 @@ app: no dialog, no step-size setting to find first, and the granularity you
 want is wherever you put the pointer. Copying it is not optional if an SDR#
 user is to feel at home.
 
+**And a wheel is not a thing everybody has.** On a laptop the wheel is a
+two-finger gesture on a trackpad that a beginner may never have used
+deliberately, which left the app's primary tuning control unreachable for
+exactly the audience it was written for. So each digit is also two buttons:
+clicking its upper half winds it up and its lower half winds it down, by the
+same decade the wheel would have moved. The hovered half is the one that
+lights up, so what a click is about to do is visible before it happens. The
+step buttons either side of the readout are the third way in, and they are
+the one that needs no aim.
+
 The arithmetic is module-level functions rather than methods so it can be
 tested without a display.
 """
@@ -44,6 +54,15 @@ def nudge_digit(value_hz: int, index: int, steps: int) -> int:
     return int(value_hz) + steps * digit_step_hz(index)
 
 
+def half_at(top: float, height: float, y: float) -> int:
+    """Which half of a digit cell a point is in: +1 above, -1 below.
+
+    The boundary belongs to the lower half, arbitrarily but consistently, so
+    that a click exactly on the middle pixel always does the same thing.
+    """
+    return 1 if y < top + height / 2.0 else -1
+
+
 def format_digits(value_hz: int) -> str:
     """Zero-padded to a fixed width so the display never reflows."""
     return f"{max(0, int(value_hz)):0{DIGITS}d}"
@@ -66,6 +85,10 @@ class FrequencyDisplay(QWidget):
         self.maximum_hz = int(maximum_hz)
         self._value_hz = int(value_hz)
         self._hover_digit: int | None = None
+        # Which half of the hovered digit the pointer is in, so the highlight
+        # says which way a click will go rather than merely which digit it
+        # will land on.
+        self._hover_half = 1
         self._digit_rects: list[QRectF] = []
 
         self._font = QFont("Consolas")
@@ -76,8 +99,27 @@ class FrequencyDisplay(QWidget):
 
         self.setMouseTracking(True)
         self.setMinimumHeight(58)
+        # Wide enough for every digit it can ever show. Without this the
+        # readout is Expanding with no floor, so a narrow window squeezes it
+        # and the digits are painted over the buttons either side - which
+        # looks like a rendering fault rather than a window that is too small.
+        metrics = QFontMetricsF(self._font)
+        separators = (DIGITS - 1) // GROUP
+        self.setMinimumWidth(
+            int(
+                DIGITS * metrics.horizontalAdvance("0")
+                + separators * metrics.horizontalAdvance(".")
+                + QFontMetricsF(self._unit_font).horizontalAdvance(" MHz")
+                + 24
+            )
+        )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip(
+            "Click the top half of a digit to wind it up and the bottom half "
+            "to wind it down - or scroll the wheel over it. The buttons "
+            "either side move a whole channel at a time."
+        )
 
     # -- value -------------------------------------------------------------
 
@@ -124,7 +166,13 @@ class FrequencyDisplay(QWidget):
             self._digit_rects.append(rect)
 
             if index == self._hover_digit:
-                painter.fillRect(rect.adjusted(-1, 2, 1, -2), HIGHLIGHT_COLOUR)
+                # Only the half under the pointer, because that half is a
+                # button and the other one is a different button.
+                half = QRectF(rect)
+                half.setHeight(rect.height() / 2.0)
+                if self._hover_half < 0:
+                    half.moveTop(rect.top() + rect.height() / 2.0)
+                painter.fillRect(half.adjusted(-1, 2, 1, -2), HIGHLIGHT_COLOUR)
             painter.setPen(LEADING_ZERO_COLOUR if leading else ACTIVE_COLOUR)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, character)
             x += digit_width
@@ -155,12 +203,40 @@ class FrequencyDisplay(QWidget):
                 return index
         return None
 
+    def _half_at(self, index: int, position) -> int:
+        rect = self._digit_rects[index]
+        return half_at(rect.top(), rect.height(), position.y())
+
     def mouseMoveEvent(self, event) -> None:
         hover = self._digit_at(event.position())
-        if hover != self._hover_digit:
+        half = self._hover_half
+        if hover is not None:
+            half = self._half_at(hover, event.position())
+        if hover != self._hover_digit or half != self._hover_half:
             self._hover_digit = hover
+            self._hover_half = half
             self.update()
         super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        """A click is a nudge of the digit under it, in the half clicked.
+
+        The whole of the tuning story for somebody with no wheel: the readout
+        is ten controls rather than a label, and which one a click lands on
+        is the decade it moves.
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        index = self._digit_at(event.position())
+        if index is None:
+            super().mousePressEvent(event)
+            return
+        steps = self._half_at(index, event.position())
+        self._hover_digit = index
+        self._hover_half = steps
+        self.set_value(nudge_digit(self._value_hz, index, steps), notify=True)
+        event.accept()
 
     def leaveEvent(self, event) -> None:
         self._hover_digit = None
@@ -179,4 +255,11 @@ class FrequencyDisplay(QWidget):
         event.accept()
 
 
-__all__ = ["DIGITS", "FrequencyDisplay", "digit_step_hz", "format_digits", "nudge_digit"]
+__all__ = [
+    "DIGITS",
+    "FrequencyDisplay",
+    "digit_step_hz",
+    "format_digits",
+    "half_at",
+    "nudge_digit",
+]

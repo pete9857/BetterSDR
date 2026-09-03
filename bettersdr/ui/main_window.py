@@ -98,6 +98,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("BetterSDR")
         self.resize(1180, 760)
+        # Below this the listening screen stops being usable rather than
+        # merely cramped: the readout and the buttons either side of it run
+        # into each other, and the control column loses the room its widest
+        # row was measured to need. Qt will not go under a layout's own
+        # minimum anyway - this states the intent, and stops a dragged edge
+        # producing a screen nobody could take a sensible screenshot of.
+        self.setMinimumSize(900, 600)
         self.setStyleSheet(WINDOW_STYLE)
         self.engine = engine
         self.settings = settings

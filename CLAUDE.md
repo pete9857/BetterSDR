@@ -1756,14 +1756,19 @@ vendor/nrsc5/     the NRSC-5 decoder itself - a separate GPL-3 program,
                   the aircraft map draws on - filled areas, not an outline.
                   Data, like the band plan; a second region is a second file
     freq_manager.py  the bookmark window
-    widgets/      spectrum.py, waterfall.py, frequency.py, meter.py,
+    widgets/      spectrum.py, waterfall.py, meter.py,
+                  frequency.py (the digit readout, and three ways to move
+                  it: the wheel, a click on the top or bottom half of a
+                  digit, and the step buttons the view puts either side),
                   colormaps.py, axes.py, signalcard.py, aircraftcard.py,
                   activitycard.py (one watched channel: how busy, what it
                   sounded like, Hold and Skip - updated rather than rebuilt,
                   because its numbers change five times a second and its
                   buttons must not move),
                   planemap.py, pagerlog.py, icons.py,
-                  panel.py (the sectioned, level-gated control column),
+                  panel.py (the sectioned, level-gated control column: it
+                  measures the width its widest row needs and is a splitter
+                  pane the user can widen from there),
                   help.py (a control's own name as the way in to what it
                   means: the clickable caption and the question mark for
                   rows that carry their own text),
@@ -1878,6 +1883,32 @@ Device control calls are serialised through a command queue consumed by the read
   broken.
 - **The three stacked panes share `AXIS_WIDTH`.** A waterfall offset from the
   spectrum above it puts every frequency wrong by a few hundred kHz.
+- **A column's width is measured from the rows in it, never declared.**
+  `fit_to_column` stops one field running away with the width; it does not
+  make a fixed number enough for the widest *row*, which is a caption plus
+  the spacing plus a field. `ControlPanel.fit_to_contents` asks the built
+  layout, at Expert, with the scrollbar's own hint added - and every part of
+  that sentence was wrong once: a hidden row is not in a layout's minimum, a
+  row no level shows is not in any level either, and a scrollbar nobody has
+  seen yet reports itself as 100 px wide. A declared 272 px cut 33 px off
+  every spin box's arrows and off every question mark in the column. See
+  **Amendment 21** in docs/PLAN.md.
+- **A control hidden on its own leaves half a row behind.** `add_wide` wraps
+  a control that carries a question mark, so `setVisible(False)` on the
+  control hides the control and leaves the question mark floating with
+  nothing to its left. `panel.set_row_visible` is how a view hides a row.
+- **No control may be reachable only by the mouse wheel.** A wheel is a
+  two-finger trackpad gesture on a laptop, which a beginner may never have
+  used deliberately - so the digit readout is also two buttons per digit
+  (upper half up, lower half down) and carries a step button either side.
+  The step is the band's channel raster where it has one, and otherwise the
+  largest fixed step that still fits inside the channel being listened
+  through.
+- **A pane whose contents arrive later cannot be sized by its size hint.**
+  A splitter opens at the hints of its panes, and stretch factors only
+  decide how *extra* room is shared out - so the aircraft list, which hints
+  at nothing until aircraft have been heard, opened as a 60 px strip. State
+  the opening sizes, and give a pane the room its own click asked for.
 - **The window is what the radio captured; the view is what is on screen, and
   they are no longer the same thing.** `ui/widgets/viewspan.py` says how much
   of the window the panes are showing, as a zoom and an offset expressed in

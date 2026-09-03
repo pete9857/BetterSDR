@@ -17,7 +17,12 @@ from bettersdr.scan import bandplan, monitor, voice
 from bettersdr.scan.classifier import Signal, Strength
 from bettersdr.ui import results
 from bettersdr.ui.levels import Level
-from bettersdr.ui.listen_view import band_headline
+from bettersdr.ui.listen_view import (
+    band_headline,
+    format_step,
+    step_frequency,
+    tuning_step_hz,
+)
 from bettersdr.ui.widgets import (
     activitycard,
     aircraftcard,
@@ -29,6 +34,7 @@ from bettersdr.ui.widgets.frequency import (
     DIGITS,
     digit_step_hz,
     format_digits,
+    half_at,
     nudge_digit,
 )
 from bettersdr.ui.widgets.planemap import (
@@ -136,6 +142,72 @@ def test_format_is_fixed_width_so_the_display_never_reflows():
     assert format_digits(98_500_000) == "0098500000"
     assert len(format_digits(1_766_000_000)) == DIGITS
     assert len(format_digits(0)) == DIGITS
+
+
+def test_the_top_half_of_a_digit_winds_it_up_and_the_bottom_half_down():
+    """The click alternative to the wheel, for anyone without one."""
+    assert half_at(100.0, 40.0, 105.0) == 1
+    assert half_at(100.0, 40.0, 135.0) == -1
+
+
+def test_the_middle_of_a_digit_always_does_the_same_thing():
+    """Arbitrary, but a boundary that wobbles is a control nobody trusts."""
+    assert half_at(0.0, 40.0, 20.0) == half_at(0.0, 40.0, 20.0) == -1
+
+
+# -- Tuning by button ------------------------------------------------------
+
+
+def test_a_band_with_a_raster_steps_by_one_channel():
+    fm = bandplan.find(98_500_000)
+    assert fm is not None
+    assert tuning_step_hz(fm, 200_000.0) == 200_000
+    am = bandplan.find(710_000)
+    assert am is not None
+    assert tuning_step_hz(am, 10_000.0) == 10_000
+
+
+def test_without_a_raster_the_step_is_the_channel_being_listened_through():
+    """The largest ladder step that still fits inside the filter.
+
+    Smaller and the readout moves without the station moving out of the
+    channel; much larger and the dial walks past what is next door.
+    """
+    assert tuning_step_hz(None, 12_500.0) == 12_500
+    assert tuning_step_hz(None, 200_000.0) == 200_000
+    assert tuning_step_hz(None, 20_000.0) == 12_500
+    # Narrower than anything on the ladder - a CW filter - still steps.
+    assert tuning_step_hz(None, 500.0) == 500
+    assert tuning_step_hz(None, 10.0) == 100
+
+
+def test_stepping_inside_a_band_lands_on_channels():
+    fm = bandplan.find(98_500_000)
+    assert step_frequency(98_500_000, 1, fm, 200_000.0) == 98_700_000
+    assert step_frequency(98_500_000, -1, fm, 200_000.0) == 98_300_000
+
+
+def test_stepping_off_the_raster_lands_on_the_raster_first():
+    """Arriving from a click on the spectrum, up should give the station.
+
+    98.437 MHz is what a click between two stations produces. One press up
+    is 98.5 - the station - not 98.637, which is nothing at all.
+    """
+    fm = bandplan.find(98_437_000)
+    assert step_frequency(98_437_000, 1, fm, 200_000.0) == 98_500_000
+    assert step_frequency(98_437_000, -1, fm, 200_000.0) == 98_300_000
+
+
+def test_stepping_where_nothing_is_allocated_moves_by_the_step():
+    assert step_frequency(180_000_000, 1, None, 25_000.0) == 180_025_000
+    assert step_frequency(180_000_000, -1, None, 25_000.0) == 179_975_000
+
+
+def test_a_step_is_captioned_the_way_somebody_would_say_it():
+    assert format_step(200_000) == "200 kHz"
+    assert format_step(12_500) == "12.5 kHz"
+    assert format_step(1_000_000) == "1 MHz"
+    assert format_step(500) == "500 Hz"
 
 
 # -- Signal icons ----------------------------------------------------------

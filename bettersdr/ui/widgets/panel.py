@@ -25,6 +25,17 @@ end of their centred captions and every spin box lost its arrows. Every field
 is passed through `fit_to_column` on the way in, which is what keeps the
 column honest.
 
+**And the column is then measured rather than guessed.** `fit_to_column`
+stops one field running away with the width; it does not make a fixed 272 px
+enough for the widest *row*, which is a caption plus a field plus the space
+between them. Measured at Expert, with the scrollbar the column always has,
+that came to 305 px - so the fixed width cut 33 px off every spin box's
+arrows and the right-hand edge of every combo. `fit_to_contents` asks the
+built layout what it needs and adopts that as the minimum the column may
+ever be, which is a number that cannot drift when a caption is reworded.
+The panel is then a splitter pane rather than a fixed one: the minimum is
+what keeps it honest, and the user is free to give it more.
+
 **A row can say what it means.** Passing `topic=` makes the caption a link
 into the Learn tab - see `widgets/help.py` - and the panel gathers every one
 of them onto a single `helpRequested`, so the listening screen connects once
@@ -57,14 +68,23 @@ from ..learn import has
 from ..levels import Level
 from .help import HelpButton, HelpLabel, label_for
 
-# Wide enough for the longest label plus a field at a usable size, once
-# `fit_to_column` has stopped the combo boxes asking for more. Measured, not
-# guessed: the widest two-column row is "Offset tuning" at 70 + 12 + 118.
+# The width the column opens at, before `fit_to_contents` measures what the
+# rows actually need. It is a floor rather than a ceiling now: a panel
+# narrower than this looks like a strip whatever fits in it.
 PANEL_WIDTH = 272
+# How much wider than its own minimum the column is allowed to be dragged.
+# Not a technical limit - it is that a control column half the window wide
+# is a worse screen than a spectrum, and nothing in here gets better with
+# more room.
+MAX_PANEL_WIDTH = 520
 # How little a combo box may shrink to. Small enough that the sound-card list
 # cannot widen the panel, large enough that a mode name is still readable.
 MIN_FIELD_CHARS = 6
 BACKGROUND = "#10151c"
+# Where a wrapped control remembers the row it was put in. A Qt property
+# rather than an attribute, because the widget is a C++ object whose Python
+# wrapper is not guaranteed to be the same one twice.
+ROW_PROPERTY = "panelRow"
 
 PANEL_STYLE = """
 QWidget#panelContent { background: #10151c; }
@@ -108,6 +128,18 @@ QWidget#panelContent QSlider::handle:horizontal {
     width: 12px; margin: -5px 0;
 }
 """
+
+
+def set_row_visible(widget: QWidget, shown: bool) -> None:
+    """Show or hide the whole row a control sits in.
+
+    `add_wide` may wrap a control in a row of its own to carry the question
+    mark that explains it, and `setVisible` on the control alone then hides
+    half a row. Every caller that hides a control for a reason of its own
+    goes through here, and a control that was never wrapped is simply itself.
+    """
+    row = widget.property(ROW_PROPERTY)
+    (row if isinstance(row, QWidget) else widget).setVisible(shown)
 
 
 def fit_to_column(widget: QWidget) -> QWidget:
@@ -214,6 +246,11 @@ class Section:
         # The container, not the child: hiding only the check box would leave
         # an empty row the height of a control at every level below its own.
         self._rows.append((row, at))
+        # And the caller is given the way back to it, because a view that
+        # hides a control for its own reasons - HD Radio on a build with no
+        # decoder - would otherwise leave the question mark beside it
+        # floating in the column with nothing to its left.
+        widget.setProperty(ROW_PROPERTY, row)
         return widget
 
     def apply_level(self, level: Level) -> bool:
@@ -237,8 +274,23 @@ class ControlPanel(QScrollArea):
 
     def __init__(self, width: int = PANEL_WIDTH, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(width)
+        # What the column asks for when it is first laid out. A splitter takes
+        # its opening sizes from the size hints of its panes, so this is how
+        # the panel says how wide it would like to be without also insisting
+        # on it - `fit_to_contents` raises it to whatever the rows need, and
+        # `set_preferred_width` puts back whatever the user last dragged.
+        self._preferred = int(width)
+        self.setMinimumWidth(int(width))
+        self.setMaximumWidth(MAX_PANEL_WIDTH)
         self.setWidgetResizable(True)
+        # A scroll area is horizontally Expanding by default, which in a
+        # splitter means it takes its share of every pixel the window grows
+        # by - at Simple, where three controls are showing, that had the
+        # column half as wide again as it needed to be. Preferred keeps it at
+        # the width it asked for and gives the spectrum the rest; dragging
+        # the handle still overrides it, which is the whole point of a
+        # splitter.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.setFrameShape(QScrollArea.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
@@ -272,6 +324,71 @@ class ControlPanel(QScrollArea):
         self.setWidget(content)
 
         self._sections: list[Section] = []
+
+    # -- width -------------------------------------------------------------
+
+    def sizeHint(self):  # noqa: N802 - Qt's name
+        """As tall as a scroll area likes, and exactly as wide as asked for.
+
+        A `QScrollArea` left to itself hints at the size of everything it
+        contains, which in a splitter would open this pane over half the
+        window and push the spectrum into a strip.
+        """
+        hint = super().sizeHint()
+        hint.setWidth(self._preferred)
+        return hint
+
+    def fit_to_contents(self) -> int:
+        """Adopt the width the widest level actually needs, and return it.
+
+        Measured at Expert, because that is the most this column can ever be
+        asked to show and a hidden row is not in a layout's minimum: measure
+        at Simple and Expert is cut off at the right-hand edge, which is the
+        fault this exists to end arriving by a new route. Measuring with
+        *every* row visible is not the same thing and is worse - it includes
+        the rows this level does not have, and sized the column 90 px wider
+        than anything it can display.
+
+        The caller sets the level it actually wants immediately afterwards;
+        every one of them does so anyway, because the level is what the view
+        was constructed with.
+        """
+        content = self.widget()
+        if content is None:
+            return self._preferred
+        self.set_level(Level.EXPERT)
+        needed = content.minimumSizeHint().width() + self._scrollbar_width()
+        needed += 2 * self.frameWidth()
+        self._preferred = max(self._preferred, needed)
+        self.setMinimumWidth(self._preferred)
+        self.setMaximumWidth(max(MAX_PANEL_WIDTH, self._preferred))
+        self.updateGeometry()
+        return self._preferred
+
+    def set_preferred_width(self, width: int) -> int:
+        """Open at `width`, or at the minimum if that is wider. Returns it."""
+        self._preferred = max(self.minimumWidth(), min(self.maximumWidth(), int(width)))
+        self.updateGeometry()
+        return self._preferred
+
+    @property
+    def preferred_width(self) -> int:
+        return self._preferred
+
+    def _scrollbar_width(self) -> int:
+        """The scrollbar's own width, which the column always loses.
+
+        Always, not sometimes: forty rows do not fit on any screen this app
+        runs on, so the vertical bar is permanently there and the viewport is
+        permanently that much narrower than the pane.
+
+        The hint, never the current width: a widget that has not been shown
+        yet is 100 px wide by default, whatever it is, and asking a scrollbar
+        how wide it is before anybody has seen it made the column 88 px too
+        wide - which is the same class of mistake as measuring the rows
+        before a level has hidden any of them.
+        """
+        return self.verticalScrollBar().sizeHint().width()
 
     def section(self, title: str, level: Level = Level.STANDARD) -> Section:
         section = Section(
@@ -314,11 +431,14 @@ def on_change(widget: QWidget, slot: Callable[..., None]) -> None:
 
 
 __all__ = [
+    "MAX_PANEL_WIDTH",
     "MIN_FIELD_CHARS",
+    "ROW_PROPERTY",
     "PANEL_STYLE",
     "PANEL_WIDTH",
     "ControlPanel",
     "Section",
     "fit_to_column",
     "on_change",
+    "set_row_visible",
 ]

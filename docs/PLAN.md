@@ -3161,3 +3161,153 @@ exactly that class of collision.
 - **Whether `text_steady` ever refuses a station outright.** A broadcaster
   that sends neither a terminator, nor sixteen segments, nor a repeat would
   never settle — none was found, but none was looked for beyond one station.
+
+## Amendment 21 — A window that fits, and tuning without a wheel (2026-09-02)
+
+### What was reported
+
+> Please touch up the ui to allow for all elements to be easily seeable and
+> adjustable. For example, right now on the listen screen, the right hand side
+> widgets currently go off the edge of the screen. Also on the aircraft view,
+> when an airplane is clicked on, make the list view at least 1/3rd of the
+> screen. Also please add buttons to either side of the frequency to allow for
+> manual tuning via buttons, if the user doesn't have a scroll wheel (like on a
+> laptop touchpad) it makes it hard to manually tune.
+
+Three faults, and the third is the serious one: the app's primary tuning
+control could not be operated by a large fraction of the machines it runs on.
+
+### The control column was 33 px too narrow, and had been since Phase 3
+
+`widgets/panel.py` already carried a note about a combo box that demanded
+278 px of a 250 px column, and the cure — `fit_to_column`, which stops any one
+field asking for more than the column has. That was the right fix for the
+wrong half of the problem. What sets the width is not the widest *field*, it
+is the widest *row*: a caption, the spacing between the columns, and a field.
+Measured at Expert on this machine that is **293 px**, and the vertical
+scrollbar the column always has takes **12** more. `PANEL_WIDTH` was 272.
+
+The 33 px went off the right-hand edge, because horizontal scrolling is off
+and a `QScrollArea` cannot shrink a child below its minimum. What it cost was
+every spin box's arrows, the right edge of every combo box, and — invisibly,
+because nobody knew they were there — **the question mark beside every row
+that offers an explanation**. The Learn tab's own way in was off the edge of
+the screen it was built for.
+
+So the width is measured rather than declared. `ControlPanel.fit_to_contents`
+asks the built layout what it needs and adopts that as the minimum. Three
+things about that measurement are not obvious, and all three were found by
+getting them wrong first:
+
+- **Measure at Expert, not with every row visible.** A hidden row is not in a
+  layout's minimum, so measuring after `set_level(SIMPLE)` sizes the column
+  for three controls and cuts Expert off — the original fault, arriving by a
+  new route. But measuring with *everything* visible is worse, not better: it
+  includes rows no level ever shows at once, and gave **381 px** for a column
+  that can never display more than 293.
+- **A scrollbar that has not been shown is 100 px wide.** `QWidget.width()`
+  before the first show is the default, whatever the widget is. Asking the
+  scrollbar how wide it *was*, rather than how wide it wants to be, made the
+  column **88 px** too wide and nothing on the screen said why.
+- **A `QScrollArea` is horizontally Expanding by default**, so in a splitter
+  it takes its share of every pixel the window grows by. At Simple, where
+  three controls are showing, that had the column half as wide again as it
+  needed to be. `Preferred` keeps it at the width it asked for; dragging the
+  handle still overrides it, which is what a splitter is for.
+
+The column is a splitter pane now rather than a fixed one — "easily
+**adjustable**" was half the request — with its measured minimum as the floor
+and 520 px as the ceiling, because nothing in it gets better with more room
+and a control column half the window wide is a worse screen than a spectrum.
+The width is remembered in `panel_width`, clamped on the way back in by that
+same measured minimum: a width saved by an older build, or on a machine with
+a different font, must never be able to cut a row off again.
+
+### A control hidden alone leaves half a row behind
+
+`Section.add_wide` wraps a control in a row of its own when it carries a
+question mark. `setVisible(False)` on the control then hides the control and
+leaves the question mark floating in the column with nothing to its left,
+which is what the HD Radio subchannel row did on every station that does not
+carry HD — visible in the first screenshot taken of this work and, once seen,
+obviously wrong. `panel.set_row_visible` is the way to hide a row, and the row
+is remembered on the widget as a Qt property rather than a Python attribute,
+because the C++ object's Python wrapper is not guaranteed to be the same one
+twice.
+
+### Tuning without a wheel
+
+The digit-wise readout is the fastest tuning control in any SDR application
+and `widgets/frequency.py` says so. It was also, until now, the *only* way to
+tune by hand at a granularity of the user's choosing, and it was operated
+exclusively by the mouse wheel — which on a laptop is a two-finger trackpad
+gesture a beginner may never have used deliberately. An application whose
+whole argument is that a beginner should not have to know things had put its
+primary control behind one.
+
+Three ways in now, and the readout keeps its wheel:
+
+- **Each digit is two buttons.** Clicking its upper half winds it up and its
+  lower half down, by the decade the wheel would have moved. The highlight
+  follows the half under the pointer rather than the whole digit, so what a
+  click is about to do is visible before it happens.
+- **A step button either side of the readout**, inside the Discover-list
+  buttons that were already there. They are captioned with the size of the
+  step — "− 200 kHz" — because that is the only thing about them worth
+  knowing, and they auto-repeat, which is what makes them a substitute for a
+  wheel rather than a token gesture towards one: the FM band is a hundred
+  channels, or about four seconds of holding one down.
+- **The step is the band's own channel raster** where it has one, so a press
+  is one station on FM broadcast and one channel on Marine VHF. Where a band
+  states no raster the step is the largest on a fixed ladder that still fits
+  inside the channel being listened through — a step narrower than the filter
+  moves the readout without moving the station out of it, and one much wider
+  walks past things without ever hearing them.
+
+`step_frequency` snaps before it steps, for the same reason click-to-tune
+snaps at all: arriving on 98.437 MHz from a click on the spectrum and pressing
+up should give 98.5, which is a station, rather than 98.637, which is nothing.
+
+The readout also has a minimum width now, taken from its own font metrics.
+Without one it is Expanding with no floor, and a narrow window squeezed the
+digits until they were painted over the buttons either side — which reads as a
+rendering fault rather than as a window that is too small. The window itself
+has a minimum of 900 × 600 for the same reason.
+
+### The aircraft list
+
+A `QSplitter` opens at the size hints of its panes, and a list of cards hints
+at almost nothing until there are cards in it — so the aircraft screen opened
+with the map at 87% and the list as a 60 px strip showing the top of one row.
+The stretch factors that were meant to make it 3:2 never applied, because
+stretch decides how *extra* room is shared out rather than what the opening
+sizes are. Stated outright now: 60/40 on arrival.
+
+`_reveal` used to give the list a share only when it had been dragged fully
+shut. Now it does so whenever the list has less than a third of the **screen**
+— a third of the splitter is a quarter of the window, because the heading and
+the button above it are a fifth of it, and this is a promise about what
+somebody sees. It is never taken back down: a list dragged larger stays
+larger. The map keeps at least 40% of the splitter whatever happens, because
+the click that asked for this landed on it.
+
+The map's own right-hand longitude label is dropped rather than drawn off the
+edge, which is the same rule as the ribbon's: half a longitude is not a
+smaller label, it is a wrong one, and the meridian line still says where it
+is.
+
+### What is not covered
+
+Every layout above was driven through the real widgets on the real Windows
+font stack and photographed, at 900 × 600, 1000 × 640 and 1180 × 760, at all
+three levels. None of it has been seen on a high-DPI display at 150% or 200%
+scaling, where the fonts are larger and the measurement — taken from the font
+metrics at run time, and so it should follow — has not been checked. The
+offscreen Qt platform is no use for this: it ships no fonts and overstates
+every string's width by a factor of two, which is worth knowing before
+anybody tries to screenshot this app in a test.
+
+Nor has any of it been used with a dongle attached. Nothing here touches the
+engine, the reader or a device call — the tuning buttons go through the same
+`FrequencyDisplay.set_value` the wheel does — so the risk is that a button
+does nothing rather than that the radio does something unexpected.

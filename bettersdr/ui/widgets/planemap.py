@@ -714,7 +714,11 @@ class PlaneMap(QWidget):
             painter.drawLine(QPointF(x, 0.0), QPointF(x, projection.height))
             text = format_degrees(line, "lon")
             width = QFontMetricsF(font).horizontalAdvance(text) + 12.0
-            if x >= labelled_to + width:
+            # The last one on the right is dropped rather than drawn off the
+            # edge: half a longitude is not a smaller label, it is a wrong
+            # one, and the line itself still says where the meridian is.
+            fits = x + 4.0 + width - 12.0 <= projection.width
+            if x >= labelled_to + width and fits:
                 painter.setPen(label_pen)
                 painter.drawText(QPointF(x + 4.0, projection.height - 6.0), text)
                 labelled_to = x

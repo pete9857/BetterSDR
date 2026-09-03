@@ -36,6 +36,27 @@ from .widgets.planemap import PlaneMap
 
 REFRESH_HZ = 5
 
+# How much of the screen the list gets when an aircraft is picked out on the
+# map. A splitter opens at the size hints of its panes, and a list of cards
+# hints at almost nothing until there are cards in it - so the pane that the
+# click is *about* was a 60 px strip showing the top of one row. A third is
+# enough for two aircraft and the beginning of a third, which is the answer
+# to "what does this one say" without taking the map away from under the dot
+# that was just clicked.
+#
+# A third of the *screen*, not of the splitter: the heading and the button
+# above it are a fifth of the window, so a third of what is left is a quarter
+# of what somebody is looking at, and this is a promise about what they see.
+LIST_SHARE = 1.0 / 3.0
+# ...but never so much of the splitter that the map stops being a map. The
+# click that asked for this landed on it.
+MAX_LIST_SHARE = 0.6
+# What the screen opens at, before anybody has dragged the handle. The map is
+# the better of the two on arrival - it is the one that says whether the
+# aerial is working at all - but not by so much that the list should be a
+# strip.
+OPENING_SHARES = (0.6, 0.4)
+
 VIEW_STYLE = """
 QWidget#aircraft { background: #0b0e13; }
 QLabel#heading { color: #e6edf3; font-size: 19px; font-weight: 600; }
@@ -167,6 +188,11 @@ class AircraftView(QWidget):
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
         self.split.setChildrenCollapsible(True)
+        # Stretch factors decide how *extra* room is shared out; the opening
+        # sizes come from the panes' own hints, and an empty list hints at
+        # nothing. Stated outright, or the screen opens with the list as a
+        # strip and stays that way until somebody finds the handle.
+        self.split.setSizes([int(share * 1000) for share in OPENING_SHARES])
         outer.addWidget(self.split, 1)
 
     # -- level -------------------------------------------------------------
@@ -273,19 +299,27 @@ class AircraftView(QWidget):
             self._reveal(icao)
 
     def _reveal(self, icao: int) -> None:
-        """Bring the selected card into view, opening the list if it is shut.
+        """Bring the selected card into view, giving the list room to show it.
 
-        The splitter can be dragged closed, and scrolling a pane nobody can
-        see is the same failure as not scrolling at all - so a click on the
-        map that has nowhere to land gives the list back its share first.
+        Not only when the list has been dragged shut: scrolling a pane too
+        short to hold a card is the same failure as not scrolling at all, and
+        a click on the map is a request to read what that aircraft says. So
+        the list is given `LIST_SHARE` of the screen whenever it has less,
+        and left alone whenever it has more - somebody who dragged it larger
+        does not want it snapped back to a third.
         """
         card = self._cards.get(icao)
         if card is None:
             return
         sizes = self.split.sizes()
-        if len(sizes) == 2 and sizes[1] == 0:
-            total = sizes[0]
-            self.split.setSizes([int(total * 0.6), total - int(total * 0.6)])
+        total = sum(sizes)
+        if len(sizes) == 2 and total > 0:
+            wanted = min(
+                int(round(self.height() * LIST_SHARE)),
+                int(round(total * MAX_LIST_SHARE)),
+            )
+            if sizes[1] < wanted:
+                self.split.setSizes([total - wanted, wanted])
         # After the event loop has laid the list out: a card created on this
         # same tick has no position yet, and scrolling to it would scroll to
         # wherever the layout last had something.

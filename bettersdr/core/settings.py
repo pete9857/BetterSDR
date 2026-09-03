@@ -93,6 +93,11 @@ DEFAULTS: dict[str, Any] = {
     "peak_hold": True,
     "waterfall_speed": 1,
     "split_ratio": 0.4,
+    # How wide the listening screen's control column was left. Remembered
+    # like every other display choice, and clamped on the way back in by the
+    # panel's own measured minimum - a width saved by an older build, or by a
+    # machine with a different font, must never be able to cut a row off.
+    "panel_width": 0,
     # Deliberately not remembered as "on": the bias tee puts 4.5 V on the
     # antenna port, and a setting that survives a restart could damage
     # equipment plugged in by someone who never turned it on themselves.

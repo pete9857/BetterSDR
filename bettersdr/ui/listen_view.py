@@ -56,7 +56,7 @@ from ..scan.classifier import Signal
 from . import results
 from .freq_manager import FrequencyManager
 from .levels import Level
-from .widgets import colormaps, viewspan
+from .widgets import colormaps, panel, viewspan
 from .widgets.frequency import FrequencyDisplay
 from .widgets.icons import glyph
 from .widgets.meter import SignalMeter
@@ -78,6 +78,32 @@ RECENT_SHOWN = 12
 # Both step buttons are this wide, whatever their label, so that the readout
 # between them stays centred in the window.
 STEP_BUTTON_WIDTH = 108
+# And the two tuning buttons inside them, for the same reason. Wide enough
+# for the longest step this app can offer - "- 200 kHz" - because a button
+# whose caption is the size of the step it takes has nothing else to say.
+NUDGE_BUTTON_WIDTH = 92
+# Steps offered where a band states no channel raster of its own. Every one
+# of them is a spacing somebody actually uses somewhere on the dial, and the
+# ladder is climbed until it reaches the channel being listened through: a
+# step smaller than the filter moves the dial without moving the station,
+# and one much larger walks past whatever is next door.
+NUDGE_STEPS_HZ = (
+    100,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    6_250,
+    9_000,
+    10_000,
+    12_500,
+    25_000,
+    50_000,
+    100_000,
+    200_000,
+    500_000,
+    1_000_000,
+)
 
 FFT_SIZES = (512, 1024, 2048, 4096, 8192, 16384, 32768)
 WINDOW_LABELS = {
@@ -116,6 +142,9 @@ QPushButton#stepButton {
 }
 QPushButton#stepButton:hover { border-color: #5ad1ff; color: #e6edf3; }
 QPushButton#stepButton:disabled { color: #3d4650; border-color: #1a2028; }
+QSplitter::handle:horizontal { background: #161c25; width: 4px; }
+QSplitter::handle:vertical { background: #161c25; height: 2px; }
+QSplitter::handle:hover { background: #2b3a49; }
 """
 
 
@@ -150,6 +179,60 @@ def band_headline(hz: float, level: Level) -> tuple[str, str]:
     if channel.official and level >= Level.STANDARD:
         info = f"{info} Officially: {channel.official}."
     return band.name, info
+
+
+def tuning_step_hz(band: bandplan.Band | None, bandwidth_hz: float) -> int:
+    """How far one press of a tuning button should move the dial.
+
+    A band that states a channel raster answers this outright: on FM
+    broadcast the next station is 200 kHz away and nothing in between is a
+    station at all. Where there is no raster - the space between the bands,
+    and the amateur allocations where a signal can sit anywhere - the step
+    comes off the ladder instead, taking the largest spacing that still fits
+    inside the channel being listened through. That is the honest answer to
+    "what is next door": a step narrower than the filter moves the readout
+    without moving the station out of it, and a step much wider walks past
+    things without ever hearing them.
+
+    A plain function, like `band_headline` and the digit arithmetic, because
+    what is interesting about it is the arithmetic rather than the button.
+    """
+    if band is not None and band.raster_hz:
+        return int(round(band.raster_hz))
+    width = max(float(bandwidth_hz), 0.0)
+    fits = [step for step in NUDGE_STEPS_HZ if step <= width]
+    return fits[-1] if fits else NUDGE_STEPS_HZ[0]
+
+
+def step_frequency(
+    hz: int, delta: int, band: bandplan.Band | None, bandwidth_hz: float
+) -> int:
+    """The frequency one press away from `hz`, in the direction of `delta`.
+
+    Inside a band with a raster this lands on channels rather than merely
+    moving by a channel's width: arriving on 98.437 MHz from a click on the
+    spectrum and pressing up should give 98.5, not 98.637. So the dial is
+    snapped first, and a step is only added when the snap did not already
+    move in the direction asked for - which is the same rule the Discover
+    step buttons follow, one signal at a time instead of one channel.
+    """
+    step = tuning_step_hz(band, bandwidth_hz)
+    if band is not None and band.raster_hz:
+        snapped = int(round(band.snap(hz)))
+        if delta > 0:
+            return snapped + step if snapped <= hz else snapped
+        return snapped - step if snapped >= hz else snapped
+    return int(hz) + delta * step
+
+
+def format_step(hz: float) -> str:
+    """A step size as somebody would say it: "10 kHz", "12.5 kHz", "1 MHz"."""
+    for scale, unit in ((1_000_000.0, "MHz"), (1_000.0, "kHz")):
+        if abs(hz) >= scale:
+            value = hz / scale
+            text = f"{value:.3f}".rstrip("0").rstrip(".")
+            return f"{text} {unit}"
+    return f"{hz:.0f} Hz"
 
 
 def _spin(
@@ -291,24 +374,49 @@ class ListenView(QWidget):
         outer.addLayout(self._tuner())
         outer.addLayout(self._header())
 
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-        body.addWidget(self._display(), 1)
-        body.addWidget(self._controls())
-        outer.addLayout(body, 1)
+        # A splitter rather than a fixed column, for the same reason the
+        # spectrum and the waterfall are one: how much room the controls
+        # deserve depends on what somebody is doing, and this screen cannot
+        # know. The panel measures its own minimum, so dragging it narrower
+        # than its contents - the way it used to be cut off - is not
+        # something the handle can do.
+        self._body = QSplitter(Qt.Orientation.Horizontal)
+        self._body.addWidget(self._display())
+        self._body.addWidget(self._controls())
+        self._body.setStretchFactor(0, 1)
+        self._body.setStretchFactor(1, 0)
+        self._body.setCollapsible(0, False)
+        self._body.setCollapsible(1, False)
+        self._body.setHandleWidth(4)
+        outer.addWidget(self._body, 1)
+
+        # Last, because the tuning buttons are labelled with the width of the
+        # channel they step by, and the control that says what that is lives
+        # in the column that has only just been built.
+        self._refresh_step_buttons()
 
     def _tuner(self) -> QHBoxLayout:
-        """The readout, with a step through the Discover list either side.
+        """The readout, with two ways to move it either side.
 
-        Available at every level, including Simple, and that is the same
-        argument as the Recently played section: Simple has no mode control
-        and no bandwidth, so somebody who has just been shown a list of
-        stations needs a way to walk it that does not involve going back to
-        the other screen and clicking Listen eleven times.
+        Outermost, a step through the Discover list. Available at every
+        level, including Simple, and that is the same argument as the
+        Recently played section: Simple has no mode control and no bandwidth,
+        so somebody who has just been shown a list of stations needs a way to
+        walk it that does not involve going back to the other screen and
+        clicking Listen eleven times.
 
-        Both buttons are the same fixed width so the digits stay centred in
-        the window rather than shifting when one of them changes its label.
+        Inside them, a step down and up the dial itself, by one channel of
+        whatever band the radio is in. The digits can be wheeled and clicked,
+        but a wheel is not a thing everybody has - a laptop trackpad has a
+        two-finger gesture that most beginners have never used deliberately -
+        and tuning is the one control on this screen that cannot be left
+        without an alternative. They say how far they go rather than carrying
+        an arrow, because the size of the step is the only thing about them
+        worth knowing, and they auto-repeat so the dial can be walked by
+        holding one down.
+
+        Every button is a fixed width so the digits stay centred in the
+        window rather than shifting when one of them changes its label.
         """
         row = QHBoxLayout()
         row.setContentsMargins(10, 0, 10, 0)
@@ -324,14 +432,34 @@ class ListenView(QWidget):
         self.next_found.setFixedWidth(STEP_BUTTON_WIDTH)
         self.next_found.clicked.connect(lambda: self._step_found(1))
 
+        self.tune_down = self._nudge_button(-1)
+        self.tune_up = self._nudge_button(1)
+
         self.frequency = FrequencyDisplay(value_hz=self.engine.center_hz)
         self.frequency.valueChanged.connect(self._tune)
 
         row.addWidget(self.previous_found)
+        row.addWidget(self.tune_down)
         row.addWidget(self.frequency, 1)
+        row.addWidget(self.tune_up)
         row.addWidget(self.next_found)
-        self._refresh_step_buttons()
         return row
+
+    def _nudge_button(self, delta: int) -> QPushButton:
+        """One of the two dial buttons. Held down, it keeps tuning.
+
+        The repeat is what makes them a substitute for the wheel rather than
+        a token gesture towards one: crossing the FM band a channel at a
+        time is a hundred clicks, and about four seconds of holding.
+        """
+        button = _button("")
+        button.setObjectName("stepButton")
+        button.setFixedWidth(NUDGE_BUTTON_WIDTH)
+        button.setAutoRepeat(True)
+        button.setAutoRepeatDelay(400)
+        button.setAutoRepeatInterval(120)
+        button.clicked.connect(lambda: self._nudge(delta))
+        return button
 
     def _header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -427,6 +555,10 @@ class ListenView(QWidget):
         self._build_processing_section()
         self._build_correction_section()
         self._build_status_section()
+        # Before `set_level` hides anything: a hidden row is not in the
+        # layout's minimum, so measuring later would size the column for
+        # Simple mode and cut Expert off at the right-hand edge.
+        self.panel.fit_to_contents()
         return self.panel
 
     def _build_audio_section(self) -> None:
@@ -496,6 +628,10 @@ class ListenView(QWidget):
         self.bandwidth.valueChanged.connect(
             lambda khz: self.engine.set_bandwidth(khz * 1000.0)
         )
+        # Where a band states no raster the tuning buttons step by the channel
+        # being listened through, so their captions are wrong the moment this
+        # changes and right again immediately.
+        self.bandwidth.valueChanged.connect(lambda _: self._refresh_step_buttons())
         section.add("Bandwidth", self.bandwidth, topic="bandwidth")
 
         self.squelch_on = QCheckBox("Squelch")
@@ -995,6 +1131,11 @@ class ListenView(QWidget):
         self.peak_hold.setChecked(bool(settings["peak_hold"]))
         self.volume.setValue(int(float(settings["volume"]) * 100))
         self.split.setValue(int(float(settings["split_ratio"]) * 100))
+        # 0 means "never dragged", which is not the same as "as narrow as
+        # possible": the panel keeps the width it measured for itself.
+        remembered = int(settings["panel_width"] or 0)
+        if remembered > 0:
+            self.panel.set_preferred_width(remembered)
         self.ppm.setValue(int(settings["ppm"]))
         self.rds.setChecked(bool(settings["rds"]))
         self.pocsag.setChecked(bool(settings["pocsag"]))
@@ -1031,6 +1172,7 @@ class ListenView(QWidget):
             peak_hold=self.peak_hold.isChecked(),
             volume=self.volume.value() / 100.0,
             split_ratio=self.split.value() / 100.0,
+            panel_width=self.panel.width(),
             ppm=self.ppm.value(),
             rds=self.rds.isChecked(),
             pocsag=self.pocsag.isChecked(),
@@ -1179,8 +1321,46 @@ class ListenView(QWidget):
         if target is not None:
             self.show_signal(target)
 
+    def _demod_bandwidth_hz(self) -> float:
+        """How wide the channel being listened through is, in hertz.
+
+        Read off the control rather than out of the engine, because the
+        engine's copy is whatever the DSP thread has got round to building
+        and this is asked on every keystroke of the digit tuner.
+        """
+        return float(self.bandwidth.value()) * 1000.0
+
+    def _nudge(self, delta: int) -> None:
+        """One press of a tuning button: one channel down or up the dial.
+
+        Goes through the readout rather than round it, so the digits, the
+        radio and the band label all move together - and so that the clamp
+        to what the dongle can actually reach is applied in exactly one
+        place, which is the same reason click-to-tune sets the readout first.
+        """
+        hz = self.frequency.value_hz
+        target = step_frequency(
+            hz, delta, bandplan.find(hz), self._demod_bandwidth_hz()
+        )
+        self.frequency.set_value(target, notify=True)
+
     def _refresh_step_buttons(self) -> None:
         """Say where each button goes, from wherever the dial is right now."""
+        step = format_step(
+            tuning_step_hz(
+                bandplan.find(self.frequency.value_hz), self._demod_bandwidth_hz()
+            )
+        )
+        for button, sign, word in (
+            (self.tune_down, "−", "Down"),
+            (self.tune_up, "+", "Up"),
+        ):
+            button.setText(f"{sign} {step}")
+            button.setToolTip(
+                f"{word} the dial by {step}, which is one channel here. "
+                "Hold it down to keep going. The digits themselves can be "
+                "clicked or scrolled for any other step."
+            )
         for button, delta, word in (
             (self.previous_found, -1, "Previous"),
             (self.next_found, 1, "Next"),
@@ -1347,7 +1527,9 @@ class ListenView(QWidget):
         digital broadcast that was never there.
         """
         offered = self._hd_offered()
-        self.hd.setVisible(offered)
+        # The row, not the switch: both of these carry a question mark beside
+        # them, and hiding the control alone leaves that behind on its own.
+        panel.set_row_visible(self.hd, offered)
         if self.hd.isChecked() != self.engine.hd_enabled:
             self.hd.blockSignals(True)
             self.hd.setChecked(self.engine.hd_enabled)
@@ -1364,8 +1546,9 @@ class ListenView(QWidget):
         # put across the restart that changing subchannel costs, and it has
         # to go away when HD is off, where picking an entry would do nothing
         # anybody could see.
-        self.hd_program.setVisible(
-            offered and self.engine.hd_enabled and len(self._hd_programs) > 1
+        panel.set_row_visible(
+            self.hd_program,
+            offered and self.engine.hd_enabled and len(self._hd_programs) > 1,
         )
 
         self.hd_status.setText(self._hd_status_text(state))
